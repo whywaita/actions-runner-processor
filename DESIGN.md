@@ -340,6 +340,7 @@ github:
 scale_set_name: "runner-listener"  # 全 Installation で共通の Scale Set 名
 
 runner:
+  version: "2.326.0"               # actions/runner のバージョン
   actions_runner_path: "/opt/runner/actions-runner"
   workspace_root: "/opt/runner/workspaces"  # tmpfs per job, no persistence
 
@@ -440,10 +441,10 @@ func (cfg Config) ResolveMaxRunners() int {
 # 1. 依存パッケージ
 apt install bubblewrap
 
-# 2. actions/runner の展開
+# 2. actions/runner の展開（version は config.yaml で指定）
 mkdir -p /opt/runner/actions-runner
-cd /opt/runner/actions-runner
-curl -L https://github.com/actions/runner/releases/download/v2.326.0/...tar.gz | tar xz
+RUNNER_VERSION=$(yq '.runner.version' /etc/runner-listener/config.yaml)
+curl -L "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" | tar xz -C /opt/runner/actions-runner
 
 # 3. runner-listener の配置
 cp runner-listener /opt/runner-listener/
@@ -485,9 +486,10 @@ jobs:
 
 ### Runner バージョン管理
 
-`actions/runner` のバージョンは VM イメージに固定する。
-`DisableUpdate: true` により runner の自動更新は無効化される。
-更新は runner-listener のリリースサイクルに合わせて VM イメージを再ビルドする。
+- Runner バイナリは GitHub Releases (`actions/runner`) から取得
+- バージョンは `runner.version` で固定指定。`latest` 非対応（再現性のため）
+- `DisableUpdate: true` により runner の自動更新は無効化
+- 更新は config のバージョンを上げて VM を再プロビジョニングする
 
 ## 8. Project Structure
 
