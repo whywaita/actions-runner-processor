@@ -548,6 +548,8 @@ actions-runner-processor/
 │       └── templates/            # embed FS: dashboard HTML
 ├── go.mod
 ├── go.sum
+├── .goreleaser.yaml              # GoReleaser 設定
+├── .tagpr                        # tagpr 設定（自動バージョニング）
 ├── DESIGN.md                     # this file
 ├── SPEC.md                       # 実装詳細（別途）
 └── README.md
@@ -564,7 +566,59 @@ actions-runner-processor/
 | **Phase 5: Metrics** | Prometheus exporter, runner/job メトリクス公開 | 小 |
 | **Phase 6: Web UI** | embed 簡易ダッシュボード, `/api/status`, `/api/jobs` JSON API | 中 |
 | **Phase 7: Ops** | systemd unit, ログ, ヘルスチェック, graceful shutdown | 小 |
-| **Phase 8: CI/CD** | GitHub Actions workflow, GoReleaser, GHCR へのコンテナイメージ push | 中 |
+| **Phase 8: CI/CD** | GitHub Actions workflow, GoReleaser でクロスコンパイル + GitHub Release, tagpr で自動バージョニング | 中 |
+
+### CI/CD Pipeline
+
+```yaml
+# .github/workflows/release.yaml
+name: release
+on:
+  push:
+    branches: [main]
+
+jobs:
+  tagpr:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tagpr.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tagpr
+        uses: Songmu/tagpr@v1   # PR ラベルから semver を決定、タグを打つ
+
+  goreleaser:
+    needs: tagpr
+    if: needs.tagpr.outputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+```yaml
+# .goreleaser.yaml
+builds:
+  - env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    main: ./cmd/runner-listener/
+
+archives:
+  - format: tar.gz
+    name_template: "runner-listener_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+# tagpr 設定（.tagpr ファイル or .github/tagpr.yaml）
+#   PR ラベルに応じて major/minor/patch を自動判定
+```
+
+- **tagpr**: main マージ時に PR ラベルを見てバージョンを自動決定・タグ付け
+- **GoReleaser**: タグが打たれたら静的リンクバイナリをビルドし GitHub Release を作成
+- 成果物: `runner-listener_linux_amd64.tar.gz`, `runner-listener_linux_arm64.tar.gz`
 
 ## 10. Future Extensions (Out of Scope for v1)
 
