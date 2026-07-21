@@ -1,7 +1,7 @@
 # actions-runner-processor
 
 A lightweight, single-binary GitHub Actions self-hosted runner processor
-for Linux VMs — no Kubernetes required.
+for homelab Linux VMs.
 
 It uses the [actions/scaleset](https://github.com/actions/scaleset) Message
 Session API (the same protocol as ARC) to detect queued jobs and launch
@@ -38,7 +38,6 @@ sandboxes.
 | **Ephemeral Runners** | Each runner lives for exactly one job, then self-destructs. |
 | **JIT Config** | No registration token needed. Runners boot directly from a JIT config. |
 | **Sandboxed** | bubblewrap namespace isolation (`--unshare-all`). Zero cross-job interference. |
-| **ARC-Compatible** | Uses the same GitHub Message Session protocol as actions-runner-controller. |
 
 ## Quick Start
 
