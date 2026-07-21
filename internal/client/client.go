@@ -46,7 +46,7 @@ func DiscoverInstallations(ctx context.Context, auth GitHubAuth) ([]Installation
 	if err != nil {
 		return nil, fmt.Errorf("list installations: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -75,19 +75,16 @@ func DiscoverInstallations(ctx context.Context, auth GitHubAuth) ([]Installation
 
 // NewClient creates a new scaleset.Client scoped to a specific org/repo.
 func NewClient(ctx context.Context, scope string, auth GitHubAuth) (*scaleset.Client, error) {
-	// Parse scope into org/repo from URL like https://github.com/org or https://github.com/org/repo
-	return nil, fmt.Errorf("not implemented: use scaleset.NewClientWithGitHubApp")
-}
-
-// CreateOrGetScaleSet creates a new scale set or returns an existing one.
-func (c *Client) CreateOrGetScaleSet(ctx context.Context, name string) (*scaleset.RunnerScaleSet, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-// Client wraps scaleset.Client.
-type Client struct {
-	*scaleset.Client
-	scaleSetID int
+	return scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
+		GitHubConfigURL: scope,
+		GitHubAppAuth: scaleset.GitHubAppAuth{
+			ClientID:   auth.ClientID,
+			PrivateKey: auth.PrivateKey,
+		},
+		SystemInfo: scaleset.SystemInfo{
+			System: "actions-runner-processor",
+		},
+	})
 }
 
 // installationResponse mirrors the GitHub API response shape.
@@ -102,10 +99,8 @@ type installationResponse struct {
 
 // resolveScope derives the GitHub config URL from an installation.
 func resolveScope(inst installationResponse) (string, error) {
-	switch {
-	case inst.Account.Type == "Organization":
-		return fmt.Sprintf("https://github.com/%s", inst.Account.Login), nil
-	case inst.Account.Type == "User":
+	switch inst.Account.Type {
+	case "Organization", "User":
 		return fmt.Sprintf("https://github.com/%s", inst.Account.Login), nil
 	default:
 		return "", fmt.Errorf("unsupported account type: %s", inst.Account.Type)

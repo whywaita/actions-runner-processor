@@ -17,6 +17,7 @@ import (
 	"github.com/whywaita/actions-runner-processor/internal/config"
 	"github.com/whywaita/actions-runner-processor/internal/metrics"
 	"github.com/whywaita/actions-runner-processor/internal/scaler"
+	"github.com/whywaita/actions-runner-processor/internal/webui"
 )
 
 func main() {
@@ -40,16 +41,28 @@ func main() {
 
 	log.Printf("discovered %d installation(s)", len(installations))
 
-	hostname, _ := os.Hostname()
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+	}
 	maxRunners := cfg.ResolveMaxRunners()
 
 	// Metrics registry shared across all scalers
 	registry := metrics.NewRegistry()
+	webRegistry := webui.NewRegistry()
 
 	if cfg.Metrics.Enabled {
 		go func() {
 			if err := metrics.Serve(ctx, cfg.Metrics.Addr, registry); err != nil {
 				log.Printf("metrics server: %v", err)
+			}
+		}()
+	}
+
+	if cfg.WebUI.Enabled {
+		go func() {
+			if err := webui.Serve(ctx, cfg.WebUI.Addr, webRegistry); err != nil {
+				log.Printf("webui server: %v", err)
 			}
 		}()
 	}
@@ -93,8 +106,8 @@ func main() {
 				return
 			}
 			defer func() {
-				if err := sClient.DeleteRunnerScaleSet(context.Background(), scaleSet.ID); err != nil {
-					log.Printf("[%d] failed to delete scale set: %v", inst.ID, err)
+				if delErr := sClient.DeleteRunnerScaleSet(context.Background(), scaleSet.ID); delErr != nil {
+					log.Printf("[%d] failed to delete scale set: %v", inst.ID, delErr)
 				}
 			}()
 
@@ -109,10 +122,11 @@ func main() {
 				log.Printf("[%d] failed to create message session: %v", inst.ID, err)
 				return
 			}
-			defer session.Close(context.Background())
+			defer func() { _ = session.Close(context.Background()) }()
 
 			s := scaler.New(sClient, scaleSet.ID, maxRunners, cfg.Runner.MinRunners)
 			registry.Register(inst.Scope, s)
+			webRegistry.Register(inst.Scope, s)
 
 			l, err := listener.New(session, listener.Config{
 				ScaleSetID: scaleSet.ID,

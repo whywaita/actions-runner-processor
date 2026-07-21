@@ -83,7 +83,7 @@ func Serve(ctx context.Context, addr string, registry *Registry) error {
 
 	go func() {
 		<-ctx.Done()
-		srv.Shutdown(context.Background())
+		_ = srv.Shutdown(context.Background())
 	}()
 
 	log.Printf("metrics server listening on %s", addr)

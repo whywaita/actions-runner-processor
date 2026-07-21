@@ -1,0 +1,14 @@
+[Unit]
+Description=GitHub Actions Runner Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=runner-listener
+ExecStart=/opt/runner-listener/runner-listener
+Restart=always
+RestartSec=10
+Environment=CONFIG_PATH=/etc/runner-listener/config.yaml
+
+[Install]
+WantedBy=multi-user.target

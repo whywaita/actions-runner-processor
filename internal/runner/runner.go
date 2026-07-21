@@ -14,27 +14,23 @@ type Runner struct {
 	JITConfig string
 	WorkDir   string
 
-	cmd       *exec.Cmd
-	overlayPID int
-	runnerOverlayPID int
+	cmd *exec.Cmd
 }
 
 // Launch starts a runner inside a bubblewrap sandbox.
-// The caller must have already set up overlayfs directories.
 func Launch(ctx context.Context, r *Runner) error {
 	jobID := r.Name
 	overlayDir := fmt.Sprintf("/opt/runner/overlays/%s", jobID)
 	runnerOverlayDir := fmt.Sprintf("/opt/runner/overlays/%s-runner", jobID)
 	workspaceDir := fmt.Sprintf("/opt/runner/workspaces/%s", jobID)
 
-	// Build the bwrap command
 	args := []string{
-		"--bind", fmt.Sprintf("%s/merged/usr", overlayDir), "/usr",
-		"--bind", fmt.Sprintf("%s/merged/lib", overlayDir), "/lib",
-		"--bind", fmt.Sprintf("%s/merged/lib64", overlayDir), "/lib64",
-		"--bind", fmt.Sprintf("%s/merged/bin", overlayDir), "/bin",
-		"--bind", fmt.Sprintf("%s/merged/etc", overlayDir), "/etc",
-		"--bind", fmt.Sprintf("%s/merged", runnerOverlayDir), "/actions-runner",
+		"--bind", overlayDir + "/merged/usr", "/usr",
+		"--bind", overlayDir + "/merged/lib", "/lib",
+		"--bind", overlayDir + "/merged/lib64", "/lib64",
+		"--bind", overlayDir + "/merged/bin", "/bin",
+		"--bind", overlayDir + "/merged/etc", "/etc",
+		"--bind", runnerOverlayDir + "/merged", "/actions-runner",
 		"--dev", "/dev",
 		"--proc", "/proc",
 		"--tmpfs", "/home/runner",

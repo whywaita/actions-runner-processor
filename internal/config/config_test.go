@@ -7,18 +7,17 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
-	// Write a minimal config
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfgPath, []byte(`
+	if err := os.WriteFile(cfgPath, []byte(`
 github:
   client_id: "123456"
   private_key_path: /nonexistent
-    `), 0o644)
+    `), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("CONFIG_PATH", cfgPath)
-	// PrivateKey load will fail since /nonexistent doesn't exist.
-	// That's fine — we just want to verify YAML parsing and defaults.
 	cfg, err := Load()
 	if err == nil {
 		t.Errorf("expected error from missing private key, got nil")
@@ -42,16 +41,20 @@ func TestResolveMaxRunners(t *testing.T) {
 func TestDefaults(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "key.pem")
-	os.WriteFile(keyPath, []byte(`-----BEGIN RSA PRIVATE KEY-----
+	if err := os.WriteFile(keyPath, []byte(`-----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEA0Z3...
------END RSA PRIVATE KEY-----`), 0o644)
+-----END RSA PRIVATE KEY-----`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	cfgPath := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfgPath, []byte(`
+	if err := os.WriteFile(cfgPath, []byte(`
 github:
   client_id: "123456"
   private_key_path: "`+keyPath+`"
-    `), 0o644)
+    `), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("CONFIG_PATH", cfgPath)
 	cfg, err := Load()
