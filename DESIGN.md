@@ -49,7 +49,18 @@
 │  │                           │ HandleJobStarted()   │       │  │
 │  │                           │ HandleJobCompleted() │       │  │
 │  │                           │ HandleDesiredCount() │       │  │
-│  │                           └─────────┬────────────┘       │  │
+│  │                           └──┬───────┬───────────┘       │  │
+│  │                              │       │                    │  │
+│  │                    ┌─────────┘       └──────────┐        │  │
+│  │                    ▼                             ▼        │  │
+│  │  ┌────────────────────┐        ┌────────────────────┐   │  │
+│  │  │ Metrics Exporter    │        │ Web UI              │   │  │
+│  │  │ :9090/metrics       │        │ :8080               │   │  │
+│  │  │ • active_runners    │        │ • dashboard         │   │  │
+│  │  │ • jobs_total        │        │ • /api/status       │   │  │
+│  │  │ • job_duration      │        │ • /api/jobs         │   │  │
+│  │  └────────────────────┘        └────────────────────┘   │  │
+│  │                                                          │  │
 │  └────────────────────────────────────┼────────────────────┘  │
 │                                        │                       │
 │                          ┌─────────────▼──────────────┐       │
@@ -100,6 +111,8 @@
 | Sandbox | bubblewrap (`bwrap`) | rootless、依存極小（1 バイナリ）、namespace 隔離 |
 | Runner | `actions/runner` (GitHub 公式) | `--once --ephemeral` 不要。JIT Config モードで起動 |
 | Process Manager | systemd | VM 再起動時の自動起動、ログ管理 |
+| Metrics | `prometheus/client_golang` | Prometheus exporter |
+| Web UI | `embed` + `net/http` | 静的ファイル埋め込み、ゼロ依存 |
 
 ## 3. Components
 
@@ -185,41 +198,120 @@ bwrap \
 ```go
 func main() {
     cfg := config.Load()
-    client := client.New(ctx, cfg)
-    scaleSet := client.CreateOrGetScaleSet(ctx, cfg.ScaleSetName, cfg.Labels)
-    session := client.CreateMessageSession(ctx, hostname)
-    scaler := scaler.New(client, scaleSet.ID, cfg.MaxRunners)
+
+    // Auto-detect scope from GitHub App installation
+    scope := client.DetectScope(ctx, cfg.GitHub.AppID, cfg.GitHub.InstallationID)
+    sClient := client.New(ctx, scope, cfg.GitHub)
+    scaleSet := sClient.CreateOrGetScaleSet(ctx, cfg.ScaleSetName, cfg.Labels)
+    session := sClient.CreateMessageSession(ctx, hostname)
+    scaler := scaler.New(sClient, scaleSet.ID, cfg.ScaleSet.MaxRunners)
+
+    // Start metrics exporter
+    if cfg.Metrics.Enabled {
+        go metrics.Serve(ctx, cfg.Metrics.Addr, scaler)
+    }
+
+    // Start Web UI
+    if cfg.WebUI.Enabled {
+        go webui.Serve(ctx, cfg.WebUI.Addr, scaler, scaleSet)
+    }
+
     listener := listener.New(session, listener.Config{...})
     listener.Run(ctx, scaler)
 }
 ```
 
+### 3.5 Metrics Exporter
+
+`internal/metrics/` — Prometheus metrics exporter。
+
+```go
+type Exporter struct {
+    scaler *scaler.BwrapScaler
+}
+
+// Exposed metrics:
+//   runner_listener_active_runners     (gauge)
+//   runner_listener_total_jobs_started (counter)
+//   runner_listener_total_jobs_completed (counter)
+//   runner_listener_job_duration_seconds (histogram)
+```
+
+**責務**: Prometheus `/metrics` エンドポイントの提供。runner 状態、ジョブ実行数、所要時間を公開。
+
+### 3.6 Web UI
+
+`internal/webui/` — 簡易ダッシュボード。Go の `embed` で静的ファイルをバイナリに埋め込み。
+
+```
+/               → ダッシュボード（active runners, job queue, recent jobs）
+/api/status     → JSON API（scaler 状態）
+/api/jobs       → JSON API（ジョブ履歴）
+```
+
+**責務**: 現在の runner 状態とジョブ履歴の可視化。1 画面の簡易ダッシュボード。
+
 ## 4. Configuration
+
+### Scope Auto-Detection
+
+`config_url` は GitHub App の Installation から自動解決する。ユーザーが手動で scope（org/repo）を指定する必要はない。
+
+```go
+// Installation API のレスポンスから scope を自動判別
+installation, _ := gh.Apps.GetInstallation(ctx, installationID)
+
+switch {
+case installation.RepositorySelection == "selected" && len(installation.Repositories) == 1:
+    configURL = fmt.Sprintf("https://github.com/%s", installation.Repositories[0].FullName)
+case installation.Account.Type == "Organization":
+    configURL = fmt.Sprintf("https://github.com/%s", installation.Account.Login)
+default:
+    // GHES or unexpected — fallback to explicit config
+}
+```
 
 ### Environment Variables / Config File
 
 ```yaml
 # /opt/runner-listener/config.yaml
 github:
-  config_url: "https://github.com/whywaita/my-repo"  # org または repo の URL
   app_id: 123456
   installation_id: 789012
   private_key_path: "/etc/runner-listener/github-app.pem"
 
 scale_set:
   name: "my-scale-set"
-  max_runners: 5
+  max_runners: 0          # 0 = auto-detect from CPU cores (runtime.NumCPU())
 
 runner:
   actions_runner_path: "/opt/runner/actions-runner"
-  workspace_root: "/opt/runner/workspaces"
+  workspace_root: "/opt/runner/workspaces"  # tmpfs per job, no persistence
+
+metrics:
+  enabled: true
+  addr: ":9090"
+
+webui:
+  enabled: true
+  addr: ":8080"
+```
+
+### max_runners Default
+
+```go
+import "runtime"
+
+if cfg.ScaleSet.MaxRunners == 0 {
+    cfg.ScaleSet.MaxRunners = runtime.NumCPU()
+}
 ```
 
 ### Required Permissions (GitHub App)
 
 | Permission | Reason |
 |-----------|--------|
-| `administration:read` | Runner Group / Scale Set の管理 |
+| `administration:read` | Installation 情報の取得、Runner Group / Scale Set の管理 |
 | `organization_self_hosted_runners:write` | Runner 登録トークン発行 |
 
 ## 5. Security Design
@@ -301,13 +393,18 @@ actions-runner-processor/
 │       └── main.go               # エントリーポイント
 ├── internal/
 │   ├── client/
-│   │   └── client.go             # scaleset.Client ラッパー
+│   │   └── client.go             # scaleset.Client ラッパー、scope 自動検出
 │   ├── config/
 │   │   └── config.go             # 設定読み込み
+│   ├── metrics/
+│   │   └── metrics.go            # Prometheus exporter
 │   ├── runner/
 │   │   └── runner.go             # bwrap runner 起動
-│   └── scaler/
-│       └── scaler.go             # listener.Scaler 実装
+│   ├── scaler/
+│   │   └── scaler.go             # listener.Scaler 実装
+│   └── webui/
+│       ├── server.go             # HTTP handler
+│       └── templates/            # embed FS: dashboard HTML
 ├── go.mod
 ├── go.sum
 ├── DESIGN.md                     # this file
@@ -319,17 +416,17 @@ actions-runner-processor/
 
 | Phase | Scope | Effort |
 |-------|-------|--------|
-| **Phase 1: Core** | `go mod init`, 設定読み込み, scaleset.Client 初期化, Scale Set 作成 | 小 |
+| **Phase 1: Core** | `go mod init`, 設定読み込み, Installation scope 自動検出, scaleset.Client 初期化, Scale Set 作成 | 小 |
 | **Phase 2: Listener** | Message Session 確立, listener.Run(), 空の Scaler | 小 |
 | **Phase 3: Runner** | JIT Config 生成, bwrap runner 起動, プロセス管理 | 中 |
-| **Phase 4: Scaler** | HandleDesiredRunnerCount (スケールアップ), HandleJobCompleted (クリーンアップ) | 中 |
-| **Phase 5: Ops** | systemd unit, ログ, ヘルスチェック, graceful shutdown | 小 |
-| **Phase 6: CI/CD** | GitHub Actions workflow, GoReleaser, GHCR へのコンテナイメージ push | 中 |
+| **Phase 4: Scaler** | HandleDesiredRunnerCount (スケールアップ/ダウン), HandleJobCompleted (クリーンアップ) | 中 |
+| **Phase 5: Metrics** | Prometheus exporter, runner/job メトリクス公開 | 小 |
+| **Phase 6: Web UI** | embed 簡易ダッシュボード, `/api/status`, `/api/jobs` JSON API | 中 |
+| **Phase 7: Ops** | systemd unit, ログ, ヘルスチェック, graceful shutdown | 小 |
+| **Phase 8: CI/CD** | GitHub Actions workflow, GoReleaser, GHCR へのコンテナイメージ push | 中 |
 
 ## 9. Future Extensions (Out of Scope for v1)
 
 - 複数 VM へのスケールアウト（Message Session がもともとマルチ listener 対応なので、同じ Scale Set を別 VM でも listen するだけで実現）
 - cgroup によるリソース制限（CPU/メモリ）
 - runner イメージの自動更新
-- metrics / Prometheus exporter
-- Web UI ダッシュボード
