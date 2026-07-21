@@ -190,18 +190,27 @@ func (r *Runner) Kill() error
 
 **bubblewrap 実行コマンド**:
 
-ジョブごとに fuse-overlayfs で全システムディレクトリの writable layer を作成する。
+ジョブごとに fuse-overlayfs で全システムディレクトリ + runner バイナリの writable layer を作成する。
 
 ```bash
 # ① overlay 作成（runner 起動前、ジョブごと）
 JOB_ID="runner-$(uuidgen | cut -c1-8)"
 OVERLAY_DIR="/opt/runner/overlays/${JOB_ID}"
+RUNNER_OVERLAY_DIR="/opt/runner/overlays/${JOB_ID}-runner"
 mkdir -p "${OVERLAY_DIR}"/{upper,work,merged}
+mkdir -p "${RUNNER_OVERLAY_DIR}"/{upper,work,merged}
 
-# fuse-overlayfs: 全システムディレクトリを1つの overlay に統合
+# fuse-overlayfs: システムディレクトリ
 fuse-overlayfs \
-  -o lowerdir=/usr:/lib:/lib64:/bin:/etc \
-  "${OVERLAY_DIR}/merged"
+  -o lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="${OVERLAY_DIR}/upper",workdir="${OVERLAY_DIR}/work" \
+  "${OVERLAY_DIR}/merged" &
+OVERLAY_PID=$!
+
+# fuse-overlayfs: runner バイナリ（read-only lower, writable upper per job）
+fuse-overlayfs \
+  -o lowerdir=/opt/runner/actions-runner,upperdir="${RUNNER_OVERLAY_DIR}/upper",workdir="${RUNNER_OVERLAY_DIR}/work" \
+  "${RUNNER_OVERLAY_DIR}/merged" &
+RUNNER_OVERLAY_PID=$!
 
 # ② bubblewrap で runner 起動
 bwrap \
@@ -210,12 +219,12 @@ bwrap \
   --bind "${OVERLAY_DIR}/merged/lib64" /lib64 \
   --bind "${OVERLAY_DIR}/merged/bin" /bin \
   --bind "${OVERLAY_DIR}/merged/etc" /etc \
+  --bind "${RUNNER_OVERLAY_DIR}/merged" /actions-runner \
   --dev /dev \
   --proc /proc \
   --tmpfs /home/runner \
   --tmpfs /tmp \
   --tmpfs /var \
-  --bind /opt/runner/actions-runner /actions-runner \
   --bind /opt/runner/workspaces/${JOB_ID} /actions-runner/_work \
   --unshare-all \
   --share-net \
@@ -225,10 +234,14 @@ bwrap \
 
 # ③ ジョブ完了後に overlay と workspace を削除
 fusermount -u "${OVERLAY_DIR}/merged"
-rm -rf "${OVERLAY_DIR}" "/opt/runner/workspaces/${JOB_ID}"
+fusermount -u "${RUNNER_OVERLAY_DIR}/merged"
+kill $OVERLAY_PID $RUNNER_OVERLAY_PID 2>/dev/null
+rm -rf "${OVERLAY_DIR}" "${RUNNER_OVERLAY_DIR}" "/opt/runner/workspaces/${JOB_ID}"
 ```
 
-`--die-with-parent` により runner-listener プロセスが死んだ場合も、bwrap が終了 → 自動的に overlay プロセスも巻き込まれて停止する。クリーンアップは Scaler の `HandleJobCompleted` 内で実行。
+- システムディレクトリと runner バイナリを **両方 overlayfs** 化。ジョブが runner バイナリを改ざんしても他ジョブに影響しない
+- クリーンアップは Scaler の `HandleJobCompleted` 内で実行
+- `fuse-overlayfs` プロセスは PID を記録し、ジョブ完了時または listener クラッシュ時に明示的に kill
 
 ### 3.4 main entrypoint
 
@@ -468,12 +481,17 @@ apt install bubblewrap fuse-overlayfs
 #   RUNNER_VERSION="v2.326.0"
 #   curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION#v}.tar.gz" | tar xz -C /opt/runner/actions-runner
 
-# 3. runner-listener の配置
+# 3. 専用ユーザー作成
+useradd -r -s /bin/false runner-listener
+mkdir -p /opt/runner/{actions-runner,workspaces,overlays}
+chown -R runner-listener:runner-listener /opt/runner
+
+# 4. runner-listener の配置
 cp runner-listener /opt/runner-listener/
 cp config.yaml /etc/runner-listener/
 cp github-app.pem /etc/runner-listener/ && chmod 600 /etc/runner-listener/github-app.pem
 
-# 4. systemd unit
+# 5. systemd unit
 cat > /etc/systemd/system/runner-listener.service << 'EOF'
 [Unit]
 Description=GitHub Actions Runner Listener
@@ -481,6 +499,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+User=runner-listener
 ExecStart=/opt/runner-listener/runner-listener
 Restart=always
 RestartSec=10
@@ -577,15 +596,28 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
 jobs:
   tagpr:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
     outputs:
       tag: ${{ steps.tagpr.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - id: tagpr
-        uses: Songmu/tagpr@v1   # PR ラベルから semver を決定、タグを打つ
+        uses: Songmu/tagpr@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   goreleaser:
     needs: tagpr
@@ -593,6 +625,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # 全履歴 + 全タグを取得（tagpr が打ったタグを GoReleaser が検出できるように）
       - uses: goreleaser/goreleaser-action@v6
         with:
           args: release --clean
