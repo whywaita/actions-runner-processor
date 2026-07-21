@@ -118,7 +118,7 @@ type Installation struct {
     Scope string // "https://github.com/org" or "https://github.com/org/repo"
 }
 
-func DiscoverInstallations(ctx context.Context, appID int64, privateKey string) ([]Installation, error)
+func DiscoverInstallations(ctx context.Context, clientID, privateKey string) ([]Installation, error)
 func NewClient(ctx context.Context, scope string, auth GitHubAuth) (*Client, error)
 func (c *Client) CreateOrGetScaleSet(ctx context.Context, name string) (*scaleset.RunnerScaleSet, error)
 func (c *Client) CreateMessageSession(ctx context.Context, owner string) (*scaleset.MessageSessionClient, error)
@@ -219,7 +219,7 @@ func main() {
     auth := cfg.GitHub
 
     // ① API から全 Installation を自動検出
-    installations, err := client.DiscoverInstallations(ctx, auth.AppID, auth.PrivateKey)
+    installations, err := client.DiscoverInstallations(ctx, auth.ClientID, auth.PrivateKey)
     if err != nil {
         log.Fatal(err)
     }
@@ -313,7 +313,7 @@ type Exporter struct {
 `config_url` は GitHub App の Installation API (`GET /app/installations`) から全 Installation を自動取得し、それぞれの scope を解決する。
 
 ```go
-func discoverInstallations(ctx context.Context, appID int64, privateKey string) ([]Installation, error) {
+func discoverInstallations(ctx context.Context, clientID, privateKey string) ([]Installation, error) {
     // JWT で GET /app/installations → 全 Installation を列挙
     installations, _ := gh.Apps.ListInstallations(ctx)
 
@@ -334,7 +334,7 @@ func discoverInstallations(ctx context.Context, appID int64, privateKey string) 
 ```yaml
 # /opt/runner-listener/config.yaml
 github:
-  app_id: 123456
+  client_id: "123456"               # GitHub App の App ID（JWT iss として使用）
   private_key_path: "/etc/runner-listener/github-app.pem"
 
 scale_set_name: "runner-listener"  # 全 Installation で共通の Scale Set 名
