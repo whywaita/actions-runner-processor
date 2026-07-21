@@ -82,22 +82,26 @@
 1. [GitHub]  workflow triggered → job queued
        │
 2. [Message Session]  job_available メッセージが Long-Poll 接続上で push
+       │                 （メッセージがない場合は HTTP 202 → すぐに再ポーリング）
        │
 3. [Listener]  AcquireJobs() でジョブを獲得
        │
 4. [Listener]  job_started メッセージ受信
        │
-5. [Scaler]    HandleDesiredRunnerCount() → GenerateJitRunnerConfig()
+5. [Scaler]    HandleDesiredRunnerCount(count=TotalAssignedJobs)
+       │          → target = min(maxRunners, minRunners + count)
+       │          → 不足分の runner を startRunner() で起動
        │
-6. [Scaler]    bwrap で runner 起動（JIT Config を環境変数で渡す）
+6. [Scaler]    startRunner() → GenerateJitRunnerConfig(name)
+       │          → bwrap で runner 起動（JIT Config を環境変数で渡す）
        │
 7. [Runner]    JIT Config で GitHub に自身を登録 → WebSocket でジョブ受信 → 実行
        │
 8. [Runner]    ジョブ完了 → 自動登録解除 → プロセス終了 → sandbox 消滅
        │
-9. [Listener]  job_completed メッセージ受信
+9. [Listener]  job_completed メッセージ受信（RunnerName を含む）
        │
-10. [Scaler]   HandleJobCompleted() → runner 状態をクリーンアップ
+10. [Scaler]   HandleJobCompleted() → RunnerName で runner を特定 → クリーンアップ
 ```
 
 ### Tech Stack
@@ -142,15 +146,40 @@ type BwrapScaler struct {
     client     *scaleset.Client
     scaleSetID int
     maxRunners int
-    // runner state management
+    minRunners int    // 常に維持する idle runner 数（デフォルト 0）
+    mu         sync.Mutex
+    runners    map[string]*runner.Runner  // RunnerName → Runner
 }
 
 func (s *BwrapScaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error
 func (s *BwrapScaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error
 func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error)
+func (s *BwrapScaler) Shutdown(ctx context.Context)  // graceful shutdown: 全 runner を kill
 ```
 
 **責務**: runner のライフサイクル管理（起動、追跡、クリーンアップ）。
+
+**`HandleDesiredRunnerCount` のセマンティクス**:
+
+`count` は `RunnerScaleSetStatistic.TotalAssignedJobs`（現在割り当て済みのジョブ総数）。
+Scaler は `minRunners + count` を目標に runner を増減させる（`maxRunners` が上限）。
+
+```go
+func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+    current := len(s.runners)
+    target := min(s.maxRunners, s.minRunners + count)
+
+    if target > current {
+        for i := 0; i < target - current; i++ {
+            s.startRunner(ctx)  // JIT Config 生成 + bwrap 起動
+        }
+    }
+    return len(s.runners), nil
+}
+```
+
+Runner の追跡には `RunnerName`（JIT Config 発行時に指定した名前）を使用。
+`HandleJobCompleted` が呼ばれたら、該当 Runner のプロセスをクリーンアップする。
 
 ### 3.3 Runner Launcher
 
@@ -202,9 +231,15 @@ func main() {
     // Auto-detect scope from GitHub App installation
     scope := client.DetectScope(ctx, cfg.GitHub.AppID, cfg.GitHub.InstallationID)
     sClient := client.New(ctx, scope, cfg.GitHub)
+
     scaleSet := sClient.CreateOrGetScaleSet(ctx, cfg.ScaleSetName, cfg.Labels)
+    defer sClient.DeleteScaleSet(context.Background(), scaleSet.ID) // graceful cleanup
+
     session := sClient.CreateMessageSession(ctx, hostname)
-    scaler := scaler.New(sClient, scaleSet.ID, cfg.ScaleSet.MaxRunners)
+    defer session.Close(context.Background()) // delete message session on exit
+
+    scaler := scaler.New(sClient, scaleSet.ID, cfg.ScaleSet.MaxRunners, cfg.ScaleSet.MinRunners)
+    defer scaler.Shutdown(context.Background()) // kill all running runners
 
     // Start metrics exporter
     if cfg.Metrics.Enabled {
@@ -216,7 +251,10 @@ func main() {
         go webui.Serve(ctx, cfg.WebUI.Addr, scaler, scaleSet)
     }
 
-    listener := listener.New(session, listener.Config{...})
+    listener := listener.New(session, listener.Config{
+        ScaleSetID: scaleSet.ID,
+        MaxRunners: cfg.ScaleSet.MaxRunners,
+    })
     listener.Run(ctx, scaler)
 }
 ```
@@ -283,6 +321,7 @@ github:
 scale_set:
   name: "my-scale-set"
   max_runners: 0          # 0 = auto-detect from CPU cores (runtime.NumCPU())
+  min_runners: 0          # 常に維持する idle runner 数（デフォルト 0）
 
 runner:
   actions_runner_path: "/opt/runner/actions-runner"
@@ -333,7 +372,46 @@ if cfg.ScaleSet.MaxRunners == 0 {
 - runner がジョブを完了すると自動で無効化
 - 仮に漏洩しても、使用済みまたは期限切れのため再利用不可
 
-## 6. Deployment
+## 6. Design Decisions & Edge Cases
+
+### Message Queue Semantics
+
+- `GetMessage()` はメッセージがない場合 **HTTP 202 → `(nil, nil)`** を返す
+- `listener.Listener` はこれを受けて即座に再ポーリングする（ビジーループにはならない）
+- `DeleteMessage()` はメッセージの **ack**。呼ばないと同じメッセージが再送される
+- Message Session のアクセストークンは期限切れがあり、SDK が自動リフレッシュ
+
+### Session Lifecycle
+
+- `MessageSessionClient` は作成時に `POST .../sessions` でセッションを確立
+- **必ず `Close()` を呼ぶこと**（`DELETE .../sessions/{id}` でセッション削除）
+- プロセス終了時は `defer session.Close(context.Background())` で確実に後始末
+
+### Scale Set Lifecycle
+
+- Scale Set は起動時に作成（または既存を取得）、終了時に削除
+- 削除しないと孤儿 Scale Set が残り、GitHub 側のジョブ割当に影響
+- 1VM 1ScaleSet 運用のため、終了時削除が安全
+
+### Runner Naming & Tracking
+
+- JIT Config 発行時の `Name` と `JobStarted.JobCompleted.RunnerName` が一致する
+- この `RunnerName` をキーに runner プロセスを追跡する
+- `HandleJobCompleted` で該当 runner のプロセスツリーを `Kill()` + sandbox 削除
+
+### Stuck Runner 対策
+
+- Runner がジョブを掴んだまま応答しなくなった場合のタイムアウトが必要
+- 将来的に `context.WithTimeout` で runner プロセス全体を kill する機構を追加
+- v1 では GitHub Actions のデフォルトジョブタイムアウト（6h）に任せる
+
+### Runner バイナリの更新
+
+- `DisableUpdate: true` を Scale Set 設定で指定（自動更新を無効化）
+- 更新は VM イメージの再ビルド + systemd 再起動で行う
+- `actions/runner` 自体の更新は `runner-listener` のデプロイフローに組み込む
+
+## 7. Deployment
 
 ### VM Setup (one-time)
 
@@ -384,7 +462,13 @@ jobs:
       - run: make build
 ```
 
-## 7. Project Structure
+### Runner バージョン管理
+
+`actions/runner` のバージョンは VM イメージに固定する。
+`DisableUpdate: true` により runner の自動更新は無効化される。
+更新は runner-listener のリリースサイクルに合わせて VM イメージを再ビルドする。
+
+## 8. Project Structure
 
 ```
 actions-runner-processor/
@@ -412,7 +496,7 @@ actions-runner-processor/
 └── README.md
 ```
 
-## 8. Development Roadmap
+## 9. Development Roadmap
 
 | Phase | Scope | Effort |
 |-------|-------|--------|
@@ -425,7 +509,7 @@ actions-runner-processor/
 | **Phase 7: Ops** | systemd unit, ログ, ヘルスチェック, graceful shutdown | 小 |
 | **Phase 8: CI/CD** | GitHub Actions workflow, GoReleaser, GHCR へのコンテナイメージ push | 中 |
 
-## 9. Future Extensions (Out of Scope for v1)
+## 10. Future Extensions (Out of Scope for v1)
 
 - 複数 VM へのスケールアウト（Message Session がもともとマルチ listener 対応なので、同じ Scale Set を別 VM でも listen するだけで実現）
 - cgroup によるリソース制限（CPU/メモリ）
