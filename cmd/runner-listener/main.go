@@ -15,6 +15,7 @@ import (
 	"github.com/actions/scaleset/listener"
 	"github.com/whywaita/actions-runner-processor/internal/client"
 	"github.com/whywaita/actions-runner-processor/internal/config"
+	"github.com/whywaita/actions-runner-processor/internal/metrics"
 	"github.com/whywaita/actions-runner-processor/internal/scaler"
 )
 
@@ -41,6 +42,17 @@ func main() {
 
 	hostname, _ := os.Hostname()
 	maxRunners := cfg.ResolveMaxRunners()
+
+	// Metrics registry shared across all scalers
+	registry := metrics.NewRegistry()
+
+	if cfg.Metrics.Enabled {
+		go func() {
+			if err := metrics.Serve(ctx, cfg.Metrics.Addr, registry); err != nil {
+				log.Printf("metrics server: %v", err)
+			}
+		}()
+	}
 
 	var wg sync.WaitGroup
 
@@ -100,6 +112,7 @@ func main() {
 			defer session.Close(context.Background())
 
 			s := scaler.New(sClient, scaleSet.ID, maxRunners, cfg.Runner.MinRunners)
+			registry.Register(inst.Scope, s)
 
 			l, err := listener.New(session, listener.Config{
 				ScaleSetID: scaleSet.ID,
