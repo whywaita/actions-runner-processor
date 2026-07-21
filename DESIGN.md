@@ -190,7 +190,7 @@ func (r *Runner) Kill() error
 
 **bubblewrap 実行コマンド**:
 
-ジョブごとに fuse-overlayfs で `/usr` の writable layer を作成し、`apt install` 等を可能にする。
+ジョブごとに fuse-overlayfs で全システムディレクトリの writable layer を作成する。
 
 ```bash
 # ① overlay 作成（runner 起動前、ジョブごと）
@@ -198,23 +198,23 @@ JOB_ID="runner-$(uuidgen | cut -c1-8)"
 OVERLAY_DIR="/opt/runner/overlays/${JOB_ID}"
 mkdir -p "${OVERLAY_DIR}"/{upper,work,merged}
 
-# fuse-overlayfs（rootless）
+# fuse-overlayfs: 全システムディレクトリを1つの overlay に統合
 fuse-overlayfs \
-  -o lowerdir=/usr,upperdir="${OVERLAY_DIR}/upper",workdir="${OVERLAY_DIR}/work" \
+  -o lowerdir=/usr:/lib:/lib64:/bin:/etc \
   "${OVERLAY_DIR}/merged"
 
 # ② bubblewrap で runner 起動
 bwrap \
-  --bind "${OVERLAY_DIR}/merged" /usr \
-  --ro-bind /lib /lib \
-  --ro-bind /lib64 /lib64 \
-  --ro-bind /bin /bin \
-  --ro-bind /etc/resolv.conf /etc/resolv.conf \
-  --ro-bind /etc/ssl /etc/ssl \
+  --bind "${OVERLAY_DIR}/merged/usr" /usr \
+  --bind "${OVERLAY_DIR}/merged/lib" /lib \
+  --bind "${OVERLAY_DIR}/merged/lib64" /lib64 \
+  --bind "${OVERLAY_DIR}/merged/bin" /bin \
+  --bind "${OVERLAY_DIR}/merged/etc" /etc \
   --dev /dev \
   --proc /proc \
   --tmpfs /home/runner \
   --tmpfs /tmp \
+  --tmpfs /var \
   --bind /opt/runner/actions-runner /actions-runner \
   --bind /opt/runner/workspaces/${JOB_ID} /actions-runner/_work \
   --unshare-all \
@@ -361,7 +361,7 @@ github:
 scale_set_name: "runner-listener"  # 全 Installation で共通の Scale Set 名
 
 runner:
-  version: "2.326.0"               # actions/runner のバージョン
+  version: "latest"                # actions/runner のバージョン。"latest" で自動解決
   actions_runner_path: "/opt/runner/actions-runner"
   workspace_root: "/opt/runner/workspaces"  # tmpfs per job, no persistence
 
@@ -403,7 +403,7 @@ func (cfg Config) ResolveMaxRunners() int {
 | Threat | Countermeasure |
 |--------|---------------|
 | ジョブ間の横断アクセス | bubblewrap `--unshare-all` (PID, IPC, UTS, mount namespace 分離) |
-| ジョブがホストファイルを改ざん | `/usr` は fuse-overlayfs によるジョブごとの CoW layer。変更は upper dir に書かれジョブ終了時に破棄。`/lib`, `/bin`, `/etc` は `--ro-bind` |
+| ジョブがホストファイルを改ざん | `/usr`, `/lib`, `/lib64`, `/bin`, `/etc` は fuse-overlayfs によるジョブごとの CoW layer。変更は upper dir に書かれジョブ終了時に破棄 |
 | runner プロセスが残存 | `--die-with-parent` (listener が死んだら全 sandbox も死ぬ) |
 | 認証情報漏洩 | GitHub App private key はファイルシステム権限 600。JIT Config はワンタイム |
 | ネットワーク経由の攻撃 | `--share-net` のみ（GitHub との通信に必要）。他の network namespace は隔離 |
@@ -462,10 +462,11 @@ func (cfg Config) ResolveMaxRunners() int {
 # 1. 依存パッケージ
 apt install bubblewrap fuse-overlayfs
 
-# 2. actions/runner の展開（version は config.yaml で指定）
-mkdir -p /opt/runner/actions-runner
-RUNNER_VERSION=$(yq '.runner.version' /etc/runner-listener/config.yaml)
-curl -L "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" | tar xz -C /opt/runner/actions-runner
+# 2. actions/runner の展開（起動時に runner-listener が自動で行う）
+#    version: "latest" → GitHub API で最新バージョンを解決 → ダウンロード
+#    手動で事前展開する場合は:
+#   RUNNER_VERSION="v2.326.0"
+#   curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION#v}.tar.gz" | tar xz -C /opt/runner/actions-runner
 
 # 3. runner-listener の配置
 cp runner-listener /opt/runner-listener/
@@ -507,10 +508,22 @@ jobs:
 
 ### Runner バージョン管理
 
-- Runner バイナリは GitHub Releases (`actions/runner`) から取得
-- バージョンは `runner.version` で固定指定。`latest` 非対応（再現性のため）
-- `DisableUpdate: true` により runner の自動更新は無効化
-- 更新は config のバージョンを上げて VM を再プロビジョニングする
+- デフォルト `"latest"` を指定すると、起動時に GitHub API から最新リリースを取得
+- 明示的なバージョン（`"v2.326.0"`）も指定可能
+- 解決は `actions/runner` の [GitHub Releases](https://github.com/actions/runner/releases) から行う
+
+```go
+func resolveRunnerVersion(cfgVersion string) (string, error) {
+    if cfgVersion == "" || cfgVersion == "latest" {
+        release, _, _ := gh.Repositories.GetLatestRelease(ctx, "actions", "runner")
+        return release.GetTagName(), nil // "v2.326.0"
+    }
+    return cfgVersion, nil
+}
+```
+
+- 起動時に解決したバージョンの tarball が未キャッシュならダウンロード
+- `DisableUpdate: true` により runner の自動更新は無効化（更新は runner-listener 再起動時）
 
 ## 8. Project Structure
 
