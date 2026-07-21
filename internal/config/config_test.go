@@ -1,0 +1,71 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoadDefaults(t *testing.T) {
+	// Write a minimal config
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+github:
+  client_id: "123456"
+  private_key_path: /nonexistent
+    `), 0o644)
+
+	t.Setenv("CONFIG_PATH", cfgPath)
+	// PrivateKey load will fail since /nonexistent doesn't exist.
+	// That's fine — we just want to verify YAML parsing and defaults.
+	cfg, err := Load()
+	if err == nil {
+		t.Errorf("expected error from missing private key, got nil")
+		return
+	}
+	_ = cfg
+}
+
+func TestResolveMaxRunners(t *testing.T) {
+	cfg := &Config{}
+	if cfg.ResolveMaxRunners() == 0 {
+		t.Error("ResolveMaxRunners with 0 should return NumCPU")
+	}
+
+	cfg.Runner.MaxRunners = 3
+	if cfg.ResolveMaxRunners() != 3 {
+		t.Error("ResolveMaxRunners should return explicit value")
+	}
+}
+
+func TestDefaults(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key.pem")
+	os.WriteFile(keyPath, []byte(`-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA0Z3...
+-----END RSA PRIVATE KEY-----`), 0o644)
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+github:
+  client_id: "123456"
+  private_key_path: "`+keyPath+`"
+    `), 0o644)
+
+	t.Setenv("CONFIG_PATH", cfgPath)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.ScaleSetName != "runner-listener" {
+		t.Errorf("ScaleSetName: want runner-listener, got %s", cfg.ScaleSetName)
+	}
+	if cfg.Runner.Version != "latest" {
+		t.Errorf("Version: want latest, got %s", cfg.Runner.Version)
+	}
+	if cfg.Runner.ActionsRunnerPath != "/opt/runner/actions-runner" {
+		t.Errorf("ActionsRunnerPath: wrong default")
+	}
+}

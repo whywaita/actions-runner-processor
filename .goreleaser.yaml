@@ -1,0 +1,15 @@
+builds:
+  - env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    main: ./cmd/runner-listener/
+
+archives:
+  - format: tar.gz
+    name_template: "runner-listener_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
