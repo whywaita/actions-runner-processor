@@ -113,12 +113,18 @@ type Client struct {
     scaleSetID int
 }
 
-func NewClient(ctx context.Context, cfg Config) (*Client, error)
-func (c *Client) CreateOrGetScaleSet(ctx context.Context, name string, labels []string) (*scaleset.RunnerScaleSet, error)
+type Installation struct {
+    ID    int64
+    Scope string // "https://github.com/org" or "https://github.com/org/repo"
+}
+
+func DiscoverInstallations(ctx context.Context, appID int64, privateKey string) ([]Installation, error)
+func NewClient(ctx context.Context, scope string, auth GitHubAuth) (*Client, error)
+func (c *Client) CreateOrGetScaleSet(ctx context.Context, name string) (*scaleset.RunnerScaleSet, error)
 func (c *Client) CreateMessageSession(ctx context.Context, owner string) (*scaleset.MessageSessionClient, error)
 ```
 
-**責務**: GitHub App 認証、Scale Set の作成/取得、Message Session の確立。
+**責務**: GitHub App 認証、Installation 自動検出、Scale Set の作成/取得、Message Session の確立。
 
 ### 3.2 BwrapScaler
 
@@ -210,46 +216,46 @@ bwrap \
 ```go
 func main() {
     cfg := config.Load()
-
-    // 共通の GitHub App 認証情報
     auth := cfg.GitHub
 
-    // Metrics Exporter（全 listener の集約ビュー）
-    var wg sync.WaitGroup
-    registry := metrics.NewRegistry()
+    // ① API から全 Installation を自動検出
+    installations, err := client.DiscoverInstallations(ctx, auth.AppID, auth.PrivateKey)
+    if err != nil {
+        log.Fatal(err)
+    }
 
-    for _, inst := range cfg.Installations {
+    // ② 全 listener の集約ビュー
+    registry := metrics.NewRegistry()
+    var wg sync.WaitGroup
+
+    for _, inst := range installations {
         wg.Add(1)
-        go func(inst config.Installation) {
+        go func(inst client.Installation) {
             defer wg.Done()
 
-            scope := client.DetectScope(ctx, auth.AppID, inst.InstallationID)
-            sClient := client.New(ctx, scope, auth)
-            scaleSet := sClient.CreateOrGetScaleSet(ctx, inst.ScaleSetName, inst.Labels)
+            sClient := client.New(ctx, inst.Scope, auth)
+            scaleSet := sClient.CreateOrGetScaleSet(ctx, cfg.ScaleSetName)
             defer sClient.DeleteScaleSet(context.Background(), scaleSet.ID)
 
             session := sClient.CreateMessageSession(ctx, hostname)
             defer session.Close(context.Background())
 
-            scaler := scaler.New(sClient, scaleSet.ID, inst.MaxRunners, inst.MinRunners)
+            scaler := scaler.New(sClient, scaleSet.ID, cfg.MaxRunners, cfg.MinRunners)
             defer scaler.Shutdown(context.Background())
 
-            registry.Register(inst.ScaleSetName, scaler)
+            registry.Register(inst.Scope, scaler)
 
-            listener := listener.New(session, listener.Config{
+            l := listener.New(session, listener.Config{
                 ScaleSetID: scaleSet.ID,
-                MaxRunners: inst.MaxRunners,
+                MaxRunners: cfg.MaxRunners,
             })
-            listener.Run(ctx, scaler)
+            l.Run(ctx, scaler)
         }(inst)
     }
 
-    // Metrics endpoint（全 Scale Set のメトリクスを集約）
     if cfg.Metrics.Enabled {
         go metrics.Serve(ctx, cfg.Metrics.Addr, registry)
     }
-
-    // Web UI
     if cfg.WebUI.Enabled {
         go webui.Serve(ctx, cfg.WebUI.Addr, registry)
     }
@@ -304,19 +310,22 @@ type Exporter struct {
 
 ### Scope Auto-Detection
 
-`config_url` は GitHub App の Installation から自動解決する。ユーザーが手動で scope（org/repo）を指定する必要はない。
+`config_url` は GitHub App の Installation API (`GET /app/installations`) から全 Installation を自動取得し、それぞれの scope を解決する。
 
 ```go
-// Installation API のレスポンスから scope を自動判別
-installation, _ := gh.Apps.GetInstallation(ctx, installationID)
+func discoverInstallations(ctx context.Context, appID int64, privateKey string) ([]Installation, error) {
+    // JWT で GET /app/installations → 全 Installation を列挙
+    installations, _ := gh.Apps.ListInstallations(ctx)
 
-switch {
-case installation.RepositorySelection == "selected" && len(installation.Repositories) == 1:
-    configURL = fmt.Sprintf("https://github.com/%s", installation.Repositories[0].FullName)
-case installation.Account.Type == "Organization":
-    configURL = fmt.Sprintf("https://github.com/%s", installation.Account.Login)
-default:
-    // GHES or unexpected — fallback to explicit config
+    var result []Installation
+    for _, inst := range installations {
+        scope := resolveScope(inst) // org all / org selected / user
+        result = append(result, Installation{
+            ID:    inst.ID,
+            Scope: scope, // "https://github.com/org" or "https://github.com/org/repo"
+        })
+    }
+    return result, nil
 }
 ```
 
@@ -328,19 +337,7 @@ github:
   app_id: 123456
   private_key_path: "/etc/runner-listener/github-app.pem"
 
-# Installation ごとに listener が 1 つ起動する
-installations:
-  - installation_id: 789012
-    scale_set_name: "caholo-runners"
-    labels: ["self-hosted", "caholo"]
-    max_runners: 0          # 0 = auto-detect from CPU cores (runtime.NumCPU())
-    min_runners: 0          # 常に維持する idle runner 数
-
-  - installation_id: 345678
-    scale_set_name: "personal-runners"
-    labels: ["self-hosted"]
-    max_runners: 0
-    min_runners: 0
+scale_set_name: "runner-listener"  # 全 Installation で共通の Scale Set 名
 
 runner:
   actions_runner_path: "/opt/runner/actions-runner"
@@ -355,20 +352,20 @@ webui:
   addr: ":8080"
 ```
 
-### max_runners Default
+### max_runners / min_runners
 
 ```go
-import "runtime"
-
-func (inst *Installation) resolveMaxRunners() int {
-    if inst.MaxRunners == 0 {
+// cfg.MaxRunners = 0 → 各 Installation が runtime.NumCPU() を使う
+// cfg.MinRunners = 0 → warm idle runner なし
+func (cfg Config) ResolveMaxRunners() int {
+    if cfg.MaxRunners == 0 {
         return runtime.NumCPU()
     }
-    return inst.MaxRunners
+    return cfg.MaxRunners
 }
 ```
 
-各 Installation がそれぞれ `runtime.NumCPU()` の runner を持つことができる（オーバーコミット）。runner はジョブ実行時のみプロセスが存在するため、普段はリソースを消費しない。
+全 Installation で同じ `maxRunners` / `minRunners` が適用される。runner はジョブ実行時のみプロセスが存在するため、N 個の Installation で N×NumCPU が起動しても実際の負荷はジョブ数次第。
 
 ### Required Permissions (GitHub App)
 
