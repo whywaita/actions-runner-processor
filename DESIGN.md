@@ -75,8 +75,9 @@
        │          → target = min(maxRunners, minRunners + count)
        │          → 不足分の runner を startRunner() で起動
        │
-6. [Scaler]    startRunner() → GenerateJitRunnerConfig(name)
-       │          → bwrap で runner 起動（JIT Config を環境変数で渡す）
+6. [Scaler]    startRunner() → fuse-overlayfs で /usr の writable layer 作成
+       │          → GenerateJitRunnerConfig(name)
+       │          → bwrap で runner 起動（JIT Config + overlay /usr）
        │
 7. [Runner]    JIT Config で GitHub に自身を登録 → WebSocket でジョブ受信 → 実行
        │
@@ -96,6 +97,7 @@
 | Listener Loop | `github.com/actions/scaleset/listener` | メッセージループ、ack、再試行を内包 |
 | Auth | GitHub App (installation token) | 既存ポリシー。PAT より安全、スコープ限定可 |
 | Sandbox | bubblewrap (`bwrap`) | rootless、依存極小（1 バイナリ）、namespace 隔離 |
+| Writable /usr | fuse-overlayfs | rootless overlayfs。ジョブごとに CoW layer、`apt install` 可能 |
 | Runner | `actions/runner` (GitHub 公式) | `--once --ephemeral` 不要。JIT Config モードで起動 |
 | Process Manager | systemd | VM 再起動時の自動起動、ログ管理 |
 | Metrics | `prometheus/client_golang` | Prometheus exporter |
@@ -188,9 +190,22 @@ func (r *Runner) Kill() error
 
 **bubblewrap 実行コマンド**:
 
+ジョブごとに fuse-overlayfs で `/usr` の writable layer を作成し、`apt install` 等を可能にする。
+
 ```bash
+# ① overlay 作成（runner 起動前、ジョブごと）
+JOB_ID="runner-$(uuidgen | cut -c1-8)"
+OVERLAY_DIR="/opt/runner/overlays/${JOB_ID}"
+mkdir -p "${OVERLAY_DIR}"/{upper,work,merged}
+
+# fuse-overlayfs（rootless）
+fuse-overlayfs \
+  -o lowerdir=/usr,upperdir="${OVERLAY_DIR}/upper",workdir="${OVERLAY_DIR}/work" \
+  "${OVERLAY_DIR}/merged"
+
+# ② bubblewrap で runner 起動
 bwrap \
-  --ro-bind /usr /usr \
+  --bind "${OVERLAY_DIR}/merged" /usr \
   --ro-bind /lib /lib \
   --ro-bind /lib64 /lib64 \
   --ro-bind /bin /bin \
@@ -201,13 +216,19 @@ bwrap \
   --tmpfs /home/runner \
   --tmpfs /tmp \
   --bind /opt/runner/actions-runner /actions-runner \
-  --bind /opt/runner/workspaces/{name} /actions-runner/_work \
+  --bind /opt/runner/workspaces/${JOB_ID} /actions-runner/_work \
   --unshare-all \
   --share-net \
   --die-with-parent \
   --new-session \
   /actions-runner/run.sh
+
+# ③ ジョブ完了後に overlay と workspace を削除
+fusermount -u "${OVERLAY_DIR}/merged"
+rm -rf "${OVERLAY_DIR}" "/opt/runner/workspaces/${JOB_ID}"
 ```
+
+`--die-with-parent` により runner-listener プロセスが死んだ場合も、bwrap が終了 → 自動的に overlay プロセスも巻き込まれて停止する。クリーンアップは Scaler の `HandleJobCompleted` 内で実行。
 
 ### 3.4 main entrypoint
 
@@ -382,7 +403,7 @@ func (cfg Config) ResolveMaxRunners() int {
 | Threat | Countermeasure |
 |--------|---------------|
 | ジョブ間の横断アクセス | bubblewrap `--unshare-all` (PID, IPC, UTS, mount namespace 分離) |
-| ジョブがホストファイルを改ざん | `/usr`, `/lib`, `/bin`, `/etc` は `--ro-bind` (read-only mount) |
+| ジョブがホストファイルを改ざん | `/usr` は fuse-overlayfs によるジョブごとの CoW layer。変更は upper dir に書かれジョブ終了時に破棄。`/lib`, `/bin`, `/etc` は `--ro-bind` |
 | runner プロセスが残存 | `--die-with-parent` (listener が死んだら全 sandbox も死ぬ) |
 | 認証情報漏洩 | GitHub App private key はファイルシステム権限 600。JIT Config はワンタイム |
 | ネットワーク経由の攻撃 | `--share-net` のみ（GitHub との通信に必要）。他の network namespace は隔離 |
@@ -439,7 +460,7 @@ func (cfg Config) ResolveMaxRunners() int {
 
 ```bash
 # 1. 依存パッケージ
-apt install bubblewrap
+apt install bubblewrap fuse-overlayfs
 
 # 2. actions/runner の展開（version は config.yaml で指定）
 mkdir -p /opt/runner/actions-runner
