@@ -1,6 +1,6 @@
 module github.com/whywaita/actions-runner-processor
 
-go 1.26.3
+go 1.26.5
 
 require (
 	github.com/actions/scaleset v0.4.0

@@ -1,4 +1,4 @@
-// Package webui provides a simple embedded dashboard for the runner-listener.
+// Package webui provides a simple embedded dashboard for actions-runner-processor.
 package webui
 
 import (

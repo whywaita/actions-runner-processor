@@ -24,18 +24,28 @@ type Installation struct {
 type GitHubAuth struct {
 	ClientID   string
 	PrivateKey string
+	// APIURL is the GitHub API base URL (default: https://api.github.com).
+	// For GHES, set to https://github.mycompany.com/api/v3.
+	APIURL string
 }
 
 // DiscoverInstallations fetches all installations for a GitHub App and resolves
 // each installation's scope (org or repo URL).
-func DiscoverInstallations(ctx context.Context, auth GitHubAuth) ([]Installation, error) {
+// baseURL is the GitHub instance URL (default: https://github.com).
+// For GHES, set to the enterprise server URL (e.g. https://github.mycompany.com).
+func DiscoverInstallations(ctx context.Context, auth GitHubAuth, baseURL string) ([]Installation, error) {
 	jwtToken, err := createAppJWT(auth.ClientID, auth.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("create JWT: %w", err)
 	}
 
+	apiURL := auth.APIURL
+	if apiURL == "" {
+		apiURL = "https://api.github.com"
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.github.com/app/installations?per_page=100", nil)
+		apiURL+"/app/installations?per_page=100", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -58,9 +68,13 @@ func DiscoverInstallations(ctx context.Context, auth GitHubAuth) ([]Installation
 		return nil, fmt.Errorf("decode installations: %w", err)
 	}
 
+	if baseURL == "" {
+		baseURL = "https://github.com"
+	}
+
 	var installations []Installation
 	for _, inst := range result {
-		scope, err := resolveScope(inst)
+		scope, err := resolveScope(inst, baseURL)
 		if err != nil {
 			return nil, fmt.Errorf("installation %d: %w", inst.ID, err)
 		}
@@ -98,10 +112,10 @@ type installationResponse struct {
 }
 
 // resolveScope derives the GitHub config URL from an installation.
-func resolveScope(inst installationResponse) (string, error) {
+func resolveScope(inst installationResponse, baseURL string) (string, error) {
 	switch inst.Account.Type {
 	case "Organization", "User":
-		return fmt.Sprintf("https://github.com/%s", inst.Account.Login), nil
+		return fmt.Sprintf("%s/%s", baseURL, inst.Account.Login), nil
 	default:
 		return "", fmt.Errorf("unsupported account type: %s", inst.Account.Type)
 	}

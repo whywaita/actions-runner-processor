@@ -1,4 +1,4 @@
-// Package config provides configuration loading for runner-listener.
+// Package config provides configuration loading for actions-runner-processor.
 package config
 
 import (
@@ -11,28 +11,34 @@ import (
 
 // Config represents the top-level configuration.
 type Config struct {
-	GitHub       GitHubConfig `yaml:"github"`
-	ScaleSetName string       `yaml:"scale_set_name"`
-	Runner       RunnerConfig `yaml:"runner"`
+	GitHub       GitHubConfig  `yaml:"github"`
+	ScaleSetName string        `yaml:"scale_set_name"`
+	Runner       RunnerConfig  `yaml:"runner"`
 	Metrics      MetricsConfig `yaml:"metrics"`
-	WebUI        WebUIConfig  `yaml:"webui"`
+	WebUI        WebUIConfig   `yaml:"webui"`
 }
 
-// GitHubConfig holds GitHub App authentication parameters.
+// GitHubConfig holds GitHub App authentication parameters and GHES endpoint overrides.
 type GitHubConfig struct {
 	ClientID       string `yaml:"client_id"`
 	PrivateKeyPath string `yaml:"private_key_path"`
 	// PrivateKey is loaded from PrivateKeyPath at startup.
 	PrivateKey string `yaml:"-"`
+
+	// GHES support: override default github.com endpoints.
+	// api_url defaults to "https://api.github.com".
+	// url is the base URL for the GitHub instance (e.g. "https://github.mycompany.com").
+	APIURL string `yaml:"api_url"`
+	URL    string `yaml:"url"`
 }
 
 // RunnerConfig holds runner binary settings.
 type RunnerConfig struct {
-	Version            string `yaml:"version"`
-	ActionsRunnerPath  string `yaml:"actions_runner_path"`
-	WorkspaceRoot      string `yaml:"workspace_root"`
-	MaxRunners         int    `yaml:"max_runners"`
-	MinRunners         int    `yaml:"min_runners"`
+	Version           string `yaml:"version"`
+	ActionsRunnerPath string `yaml:"actions_runner_path"`
+	WorkspaceRoot     string `yaml:"workspace_root"`
+	MaxRunners        int    `yaml:"max_runners"`
+	MinRunners        int    `yaml:"min_runners"`
 }
 
 // MetricsConfig holds Prometheus exporter settings.
@@ -59,7 +65,7 @@ func (c *Config) ResolveMaxRunners() int {
 func Load() (*Config, error) {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
-		path = "/etc/runner-listener/config.yaml"
+		path = "/etc/actions-runner-processor/config.yaml"
 	}
 
 	data, err := os.ReadFile(path)
@@ -83,7 +89,7 @@ func Load() (*Config, error) {
 
 	// Defaults
 	if cfg.ScaleSetName == "" {
-		cfg.ScaleSetName = "runner-listener"
+		cfg.ScaleSetName = "actions-runner-processor"
 	}
 	if cfg.Runner.Version == "" {
 		cfg.Runner.Version = "latest"
@@ -93,6 +99,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.Runner.WorkspaceRoot == "" {
 		cfg.Runner.WorkspaceRoot = "/opt/runner/workspaces"
+	}
+	if cfg.GitHub.APIURL == "" {
+		cfg.GitHub.APIURL = "https://api.github.com"
+	}
+	if cfg.GitHub.URL == "" {
+		cfg.GitHub.URL = "https://github.com"
 	}
 
 	return &cfg, nil

@@ -1,5 +1,5 @@
-// Package metrics provides a Prometheus metrics exporter for the
-// runner-listener.
+// Package metrics provides a Prometheus metrics exporter for
+// actions-runner-processor.
 package metrics
 
 import (
@@ -42,14 +42,14 @@ func (r *Registry) Register(scope string, s ScalerSnapshot) {
 var (
 	activeRunners = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "runner_listener_active_runners",
+			Name: "actions_runner_processor_active_runners",
 			Help: "Number of active runners per scale set.",
 		},
 		[]string{"scope"},
 	)
 	maxRunners = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "runner_listener_max_runners",
+			Name: "actions_runner_processor_max_runners",
 			Help: "Maximum runners per scale set.",
 		},
 		[]string{"scope"},

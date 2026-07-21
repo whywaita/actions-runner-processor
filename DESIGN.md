@@ -34,16 +34,13 @@
 │ Linux VM                                                  │
 │                                                           │
 │  ┌───────────────────────────────────────────────────┐  │
-│  │ runner-listener (single Go binary, multi-listener) │  │
+│ │  actions-runner-processor (single Go binary, multi-listener)   ││
 │  │                                                     │  │
 │  │  ┌──────────────┐  ┌──────────────┐               │  │
 │  │  │ Listener A    │  │ Listener B    │  ... (×N)     │  │
 │  │  │ (goroutine)   │  │ (goroutine)   │               │  │
 │  │  │               │  │               │               │  │
-│  │  │ scaleset.     │  │ scaleset.     │               │  │
-│  │  │ Client        │  │ Client        │               │  │
-│  │  │ MessageSession│  │ MessageSession│               │  │
-│  │  │ BwrapScaler   │  │ BwrapScaler   │               │  │
+│  │  │ scaleset. Client BwrapScaler     │  │ scaleset. Client BwrapScaler    │
 │  │  └──────┬───────┘  └──────┬────────┘               │  │
 │  │         │                 │                          │  │
 │  │  ┌──────┴─────────────────┴──────────┐              │  │
@@ -245,7 +242,7 @@ rm -rf "${OVERLAY_DIR}" "${RUNNER_OVERLAY_DIR}" "/opt/runner/workspaces/${JOB_ID
 
 ### 3.4 main entrypoint
 
-`cmd/runner-listener/main.go` — エントリーポイント。複数 Installation の listener を goroutine で並行起動する。
+`cmd/actions-runner-processor/main.go` — entrypoint. Spawns a goroutine per Installation, each running an independent Listener/MessageSession loop.
 
 ```go
 func main() {

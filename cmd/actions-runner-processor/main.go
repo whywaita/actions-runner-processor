@@ -1,4 +1,4 @@
-// runner-listener is a lightweight GitHub Actions self-hosted runner processor.
+// actions-runner-processor is a lightweight GitHub Actions self-hosted runner processor.
 // It discovers GitHub App installations, creates runner scale sets, and
 // launches ephemeral runners in bubblewrap sandboxes.
 package main
@@ -32,9 +32,10 @@ func main() {
 	auth := client.GitHubAuth{
 		ClientID:   cfg.GitHub.ClientID,
 		PrivateKey: cfg.GitHub.PrivateKey,
+		APIURL:     cfg.GitHub.APIURL,
 	}
 
-	installations, err := client.DiscoverInstallations(ctx, auth)
+	installations, err := client.DiscoverInstallations(ctx, auth, cfg.GitHub.URL)
 	if err != nil {
 		log.Fatalf("failed to discover installations: %v", err)
 	}
