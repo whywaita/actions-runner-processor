@@ -26,54 +26,37 @@
 ```
                         GitHub Actions Service
                               │
-                              │ Message Session (HTTPS Long-Poll, outbound)
-                              │
-┌─────────────────────────────┴─────────────────────────────┐
-│ Linux VM                                                     │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │ runner-listener (single Go binary)                     │  │
-│  │                                                        │  │
-│  │  ┌──────────────────┐   ┌───────────────────────┐    │  │
-│  │  │ scaleset.Client   │   │ listener.Listener      │    │  │
-│  │  │                    │   │                        │    │  │
-│  │  │ • CreateScaleSet() │   │ • Run(scaler)          │    │  │
-│  │  │ • MessageSession() │──▶│   ├ GetMessage()       │    │  │
-│  │  │ • GenerateJIT()    │   │   ├ AcquireJobs()      │    │  │
-│  │  │ • DeleteScaleSet() │   │   └ DeleteMessage()    │    │  │
-│  │  └──────────────────┘   └───────────┬─────────────┘    │  │
-│  │                                      │                   │  │
-│  │                           ┌─────────▼──────────┐       │  │
-│  │                           │ BwrapScaler          │       │  │
-│  │                           │                      │       │  │
-│  │                           │ HandleJobStarted()   │       │  │
-│  │                           │ HandleJobCompleted() │       │  │
-│  │                           │ HandleDesiredCount() │       │  │
-│  │                           └──┬───────┬───────────┘       │  │
-│  │                              │       │                    │  │
-│  │                    ┌─────────┘       └──────────┐        │  │
-│  │                    ▼                             ▼        │  │
-│  │  ┌────────────────────┐        ┌────────────────────┐   │  │
-│  │  │ Metrics Exporter    │        │ Web UI              │   │  │
-│  │  │ :9090/metrics       │        │ :8080               │   │  │
-│  │  │ • active_runners    │        │ • dashboard         │   │  │
-│  │  │ • jobs_total        │        │ • /api/status       │   │  │
-│  │  │ • job_duration      │        │ • /api/jobs         │   │  │
-│  │  └────────────────────┘        └────────────────────┘   │  │
-│  │                                                          │  │
-│  └────────────────────────────────────┼────────────────────┘  │
-│                                        │                       │
-│                          ┌─────────────▼──────────────┐       │
-│                          │ bubblewrap sandbox (×N)     │       │
-│                          │                              │       │
-│                          │  /usr, /lib, /bin → ro-bind │       │
-│                          │  /actions-runner/  → rw-bind│       │
-│                          │  /home/runner/     → tmpfs  │       │
-│                          │                              │       │
-│                          │  $ ./run.sh                  │       │
-│                          │  env: JITCONFIG=<encoded>   │       │
-│                          └──────────────────────────────┘       │
-└──────────────────────────────────────────────────────────────┘
+          ┌───────────────────┼───────────────────┐
+          │ Message Session   │ Message Session    │
+          │ (Installation A)  │ (Installation B)    │ ...
+          │                   │                    │
+┌─────────┴───────────────────┴────────────────────┴─────┐
+│ Linux VM                                                  │
+│                                                           │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ runner-listener (single Go binary, multi-listener) │  │
+│  │                                                     │  │
+│  │  ┌──────────────┐  ┌──────────────┐               │  │
+│  │  │ Listener A    │  │ Listener B    │  ... (×N)     │  │
+│  │  │ (goroutine)   │  │ (goroutine)   │               │  │
+│  │  │               │  │               │               │  │
+│  │  │ scaleset.     │  │ scaleset.     │               │  │
+│  │  │ Client        │  │ Client        │               │  │
+│  │  │ MessageSession│  │ MessageSession│               │  │
+│  │  │ BwrapScaler   │  │ BwrapScaler   │               │  │
+│  │  └──────┬───────┘  └──────┬────────┘               │  │
+│  │         │                 │                          │  │
+│  │  ┌──────┴─────────────────┴──────────┐              │  │
+│  │  │ Metrics Exporter (:9090)           │              │  │
+│  │  │ Web UI (:8080)                     │              │  │
+│  │  └────────────────────────────────────┘              │  │
+│  └──────────────────────────┬─────────────────────────┘  │
+│                              │                             │
+│              ┌───────────────┴───────────────┐            │
+│              │ bubblewrap sandboxes (×N×M)   │            │
+│              │  namespace 隔離、1job→消滅     │            │
+│              └───────────────────────────────┘            │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### Data Flow
@@ -222,42 +205,70 @@ bwrap \
 
 ### 3.4 main entrypoint
 
-`cmd/runner-listener/main.go` — エントリーポイント。
+`cmd/runner-listener/main.go` — エントリーポイント。複数 Installation の listener を goroutine で並行起動する。
 
 ```go
 func main() {
     cfg := config.Load()
 
-    // Auto-detect scope from GitHub App installation
-    scope := client.DetectScope(ctx, cfg.GitHub.AppID, cfg.GitHub.InstallationID)
-    sClient := client.New(ctx, scope, cfg.GitHub)
+    // 共通の GitHub App 認証情報
+    auth := cfg.GitHub
 
-    scaleSet := sClient.CreateOrGetScaleSet(ctx, cfg.ScaleSetName, cfg.Labels)
-    defer sClient.DeleteScaleSet(context.Background(), scaleSet.ID) // graceful cleanup
+    // Metrics Exporter（全 listener の集約ビュー）
+    var wg sync.WaitGroup
+    registry := metrics.NewRegistry()
 
-    session := sClient.CreateMessageSession(ctx, hostname)
-    defer session.Close(context.Background()) // delete message session on exit
+    for _, inst := range cfg.Installations {
+        wg.Add(1)
+        go func(inst config.Installation) {
+            defer wg.Done()
 
-    scaler := scaler.New(sClient, scaleSet.ID, cfg.ScaleSet.MaxRunners, cfg.ScaleSet.MinRunners)
-    defer scaler.Shutdown(context.Background()) // kill all running runners
+            scope := client.DetectScope(ctx, auth.AppID, inst.InstallationID)
+            sClient := client.New(ctx, scope, auth)
+            scaleSet := sClient.CreateOrGetScaleSet(ctx, inst.ScaleSetName, inst.Labels)
+            defer sClient.DeleteScaleSet(context.Background(), scaleSet.ID)
 
-    // Start metrics exporter
+            session := sClient.CreateMessageSession(ctx, hostname)
+            defer session.Close(context.Background())
+
+            scaler := scaler.New(sClient, scaleSet.ID, inst.MaxRunners, inst.MinRunners)
+            defer scaler.Shutdown(context.Background())
+
+            registry.Register(inst.ScaleSetName, scaler)
+
+            listener := listener.New(session, listener.Config{
+                ScaleSetID: scaleSet.ID,
+                MaxRunners: inst.MaxRunners,
+            })
+            listener.Run(ctx, scaler)
+        }(inst)
+    }
+
+    // Metrics endpoint（全 Scale Set のメトリクスを集約）
     if cfg.Metrics.Enabled {
-        go metrics.Serve(ctx, cfg.Metrics.Addr, scaler)
+        go metrics.Serve(ctx, cfg.Metrics.Addr, registry)
     }
 
-    // Start Web UI
+    // Web UI
     if cfg.WebUI.Enabled {
-        go webui.Serve(ctx, cfg.WebUI.Addr, scaler, scaleSet)
+        go webui.Serve(ctx, cfg.WebUI.Addr, registry)
     }
 
-    listener := listener.New(session, listener.Config{
-        ScaleSetID: scaleSet.ID,
-        MaxRunners: cfg.ScaleSet.MaxRunners,
-    })
-    listener.Run(ctx, scaler)
+    wg.Wait()
 }
 ```
+
+### 3.4.1 Multi-Listener Architecture
+
+1 プロセスで N 個の listener（goroutine）を並行稼働させる設計上のポイント：
+
+| 項目 | 設計 |
+|------|------|
+| **スケジューリング** | 各 listener は独立した goroutine。Go ランタイムが M:N スケジュール |
+| **障害分離** | 1 つの listener がエラーで死んでも他は継続。`errgroup` で集約エラーハンドリング |
+| **リソース共有** | `max_runners` の合計が CPU コア数を超える可能性があるが、runner は ephemeral でジョブ時のみ起動するため問題ない（オーバーコミット可） |
+| **メトリクス** | 全 Scaler を 1 つの Registry に登録し、Prometheus endpoint で集約表示 |
+| **Web UI** | 全 Scale Set の状態を 1 画面にタブ/カードで表示 |
 
 ### 3.5 Metrics Exporter
 
@@ -315,13 +326,21 @@ default:
 # /opt/runner-listener/config.yaml
 github:
   app_id: 123456
-  installation_id: 789012
   private_key_path: "/etc/runner-listener/github-app.pem"
 
-scale_set:
-  name: "my-scale-set"
-  max_runners: 0          # 0 = auto-detect from CPU cores (runtime.NumCPU())
-  min_runners: 0          # 常に維持する idle runner 数（デフォルト 0）
+# Installation ごとに listener が 1 つ起動する
+installations:
+  - installation_id: 789012
+    scale_set_name: "caholo-runners"
+    labels: ["self-hosted", "caholo"]
+    max_runners: 0          # 0 = auto-detect from CPU cores (runtime.NumCPU())
+    min_runners: 0          # 常に維持する idle runner 数
+
+  - installation_id: 345678
+    scale_set_name: "personal-runners"
+    labels: ["self-hosted"]
+    max_runners: 0
+    min_runners: 0
 
 runner:
   actions_runner_path: "/opt/runner/actions-runner"
@@ -341,10 +360,15 @@ webui:
 ```go
 import "runtime"
 
-if cfg.ScaleSet.MaxRunners == 0 {
-    cfg.ScaleSet.MaxRunners = runtime.NumCPU()
+func (inst *Installation) resolveMaxRunners() int {
+    if inst.MaxRunners == 0 {
+        return runtime.NumCPU()
+    }
+    return inst.MaxRunners
 }
 ```
+
+各 Installation がそれぞれ `runtime.NumCPU()` の runner を持つことができる（オーバーコミット）。runner はジョブ実行時のみプロセスが存在するため、普段はリソースを消費しない。
 
 ### Required Permissions (GitHub App)
 
