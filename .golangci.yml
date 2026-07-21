@@ -7,7 +7,3 @@ linters:
       enable-all: true
       disable:
         - fieldalignment
-
-exclusions:
-  paths:
-    - ".*_test\\.go$"
