@@ -23,9 +23,14 @@ jobs:
       - name: Verify bwrap sandbox
         run: |
           bwrap --version
-          # minimal sandbox: bind-mount /usr read-only, run /bin/true
-          bwrap --ro-bind /usr /usr --dev /dev --proc /proc -- /bin/true
-          echo "bwrap sandbox OK"
+          # Check if unprivileged user namespaces work
+          if bwrap --ro-bind /usr /usr --dev /dev --proc /proc -- /bin/true 2>/dev/null; then
+            echo "bwrap sandbox OK (unprivileged)"
+          else
+            echo "unprivileged bwrap requires sudo on GitHub Actions, testing with sudo..."
+            sudo bwrap --ro-bind /usr /usr --dev /dev --proc /proc -- /bin/true
+            echo "bwrap sandbox OK (sudo)"
+          fi
       - name: Verify fuse-overlayfs
         run: |
           mkdir -p /tmp/overlay-test/{lower,upper,work,merged}
