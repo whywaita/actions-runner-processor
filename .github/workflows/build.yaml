@@ -24,11 +24,11 @@ jobs:
         run: |
           bwrap --version
           # Check if unprivileged user namespaces work
-          if bwrap --ro-bind /usr /usr --dev /dev --proc /proc -- /bin/true 2>/dev/null; then
+          if bwrap --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
             echo "bwrap sandbox OK (unprivileged)"
           else
             echo "unprivileged bwrap requires sudo on GitHub Actions, testing with sudo..."
-            sudo bwrap --ro-bind /usr /usr --dev /dev --proc /proc -- /bin/true
+            sudo bwrap --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true
             echo "bwrap sandbox OK (sudo)"
           fi
       - name: Verify fuse-overlayfs
