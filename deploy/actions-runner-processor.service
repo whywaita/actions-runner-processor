@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 User=actions-runner-processor
-ExecStart=/opt/actions-runner-processor/actions-runner-processor
+ExecStart=/usr/bin/actions-runner-processor
 Restart=always
 RestartSec=10
 Environment=CONFIG_PATH=/etc/actions-runner-processor/config.yaml
