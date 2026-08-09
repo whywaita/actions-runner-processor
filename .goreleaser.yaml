@@ -13,3 +13,32 @@ checksum:
 
 changelog:
   sort: asc
+
+nfpms:
+  - package_name: actions-runner-processor
+    file_name_template: "actions-runner-processor_{{ .Version }}_{{ .Arch }}"
+    vendor: "whywaita"
+    homepage: "https://github.com/whywaita/actions-runner-processor"
+    maintainer: "whywaita <whywaita@example.com>"
+    description: |
+      GitHub Actions セルフホストランナーを Kubernetes なしで運用するための軽量 Go バイナリ。
+      単一の Linux VM 上で動作し、Message Session API を使ってジョブを検知し、
+      bubblewrap で隔離された ephemeral runner を動的に起動・破棄します。
+    license: MIT
+    formats:
+      - deb
+    section: admin
+    priority: optional
+    depends:
+      - bubblewrap
+      - fuse-overlayfs
+    contents:
+      - src: ./deploy/config.example.yaml
+        dst: /etc/actions-runner-processor/config.yaml
+        type: config|noreplace
+      - src: ./deploy/actions-runner-processor.service
+        dst: /etc/systemd/system/actions-runner-processor.service
+        type: config
+    scripts:
+      postinstall: ./deploy/postinstall.sh
+      preremove: ./deploy/preremove.sh

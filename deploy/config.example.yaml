@@ -1,0 +1,23 @@
+# actions-runner-processor configuration
+# See DESIGN.md for full documentation
+
+github:
+  client_id: ""                    # GitHub App ID
+  private_key_path: ""             # Path to GitHub App private key (.pem)
+
+scale_set_name: "actions-runner-processor"
+
+runner:
+  version: "latest"                # actions/runner version
+  actions_runner_path: "/opt/runner/actions-runner"
+  workspace_root: "/opt/runner/workspaces"
+  max_runners: 0                   # 0 = NumCPU
+  min_runners: 0
+
+metrics:
+  enabled: true
+  addr: ":9090"
+
+webui:
+  enabled: true
+  addr: ":8080"
