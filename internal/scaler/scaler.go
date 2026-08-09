@@ -1,0 +1,188 @@
+// Package scaler implements the listener.Scaler interface for launching
+// ephemeral runners in bubblewrap sandboxes.
+package scaler
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"sync"
+
+	"github.com/actions/scaleset"
+	"github.com/google/uuid"
+	"github.com/whywaita/actions-runner-processor/internal/runner"
+)
+
+// BwrapScaler manages runner lifecycle: launch, track, cleanup.
+type BwrapScaler struct {
+	client     *scaleset.Client
+	scaleSetID int
+	maxRunners int
+	minRunners int
+
+	mu      sync.Mutex
+	runners map[string]*runner.Runner
+	logger  *slog.Logger
+}
+
+// New creates a new BwrapScaler.
+func New(client *scaleset.Client, scaleSetID, maxRunners, minRunners int) *BwrapScaler {
+	return &BwrapScaler{
+		client:     client,
+		scaleSetID: scaleSetID,
+		maxRunners: maxRunners,
+		minRunners: minRunners,
+		runners:    make(map[string]*runner.Runner),
+		logger:     slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
+	}
+}
+
+// HandleJobStarted tracks a job that has started on a runner.
+func (s *BwrapScaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.logger.Info("job started",
+		slog.Int64("runnerRequestID", job.RunnerRequestID),
+		slog.String("runnerName", job.RunnerName),
+	)
+	return nil
+}
+
+// HandleJobCompleted cleans up after a completed job.
+func (s *BwrapScaler) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.logger.Info("job completed",
+		slog.Int64("runnerRequestID", job.RunnerRequestID),
+		slog.String("runnerName", job.RunnerName),
+		slog.String("result", job.Result),
+	)
+
+	if r, ok := s.runners[job.RunnerName]; ok {
+		_ = r.Kill()
+
+		overlayDir := fmt.Sprintf("/opt/runner/overlays/%s", job.RunnerName)
+		runnerOverlayDir := fmt.Sprintf("/opt/runner/overlays/%s-runner", job.RunnerName)
+		workspaceDir := fmt.Sprintf("/opt/runner/workspaces/%s", job.RunnerName)
+
+		_ = exec.Command("fusermount", "-u", overlayDir+"/merged").Run()
+		_ = exec.Command("fusermount", "-u", runnerOverlayDir+"/merged").Run()
+
+		_ = os.RemoveAll(overlayDir)
+		_ = os.RemoveAll(runnerOverlayDir)
+		_ = os.RemoveAll(workspaceDir)
+	}
+	delete(s.runners, job.RunnerName)
+	return nil
+}
+
+// HandleDesiredRunnerCount adjusts the number of runners.
+func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := len(s.runners)
+	target := min(s.maxRunners, s.minRunners+count)
+
+	s.logger.Info("scaling",
+		slog.Int("current", current),
+		slog.Int("target", target),
+		slog.Int("assignedJobs", count),
+	)
+
+	for i := 0; i < target-current; i++ {
+		if err := s.startRunner(ctx); err != nil {
+			return current, fmt.Errorf("start runner: %w", err)
+		}
+	}
+
+	return len(s.runners), nil
+}
+
+// Shutdown gracefully stops all runners.
+func (s *BwrapScaler) Shutdown(_ context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.logger.Info("shutting down", slog.Int("runners", len(s.runners)))
+	for name, r := range s.runners {
+		_ = r.Kill()
+		_ = os.RemoveAll(fmt.Sprintf("/opt/runner/overlays/%s", name))
+		_ = os.RemoveAll(fmt.Sprintf("/opt/runner/overlays/%s-runner", name))
+		_ = os.RemoveAll(fmt.Sprintf("/opt/runner/workspaces/%s", name))
+	}
+	clear(s.runners)
+}
+
+// MaxRunners returns the configured maximum.
+func (s *BwrapScaler) MaxRunners() int { return s.maxRunners }
+
+// ActiveRunners returns the current number of tracked runners.
+func (s *BwrapScaler) ActiveRunners() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.runners)
+}
+
+func (s *BwrapScaler) startRunner(ctx context.Context) error {
+	name := fmt.Sprintf("runner-%s", uuid.NewString()[:8])
+
+	jit, err := s.client.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{
+		Name: name,
+	}, s.scaleSetID)
+	if err != nil {
+		return fmt.Errorf("generate JIT config: %w", err)
+	}
+
+	overlayDir := fmt.Sprintf("/opt/runner/overlays/%s", name)
+	runnerOverlayDir := fmt.Sprintf("/opt/runner/overlays/%s-runner", name)
+	workspaceDir := fmt.Sprintf("/opt/runner/workspaces/%s", name)
+
+	for _, d := range []string{overlayDir, runnerOverlayDir} {
+		for _, sub := range []string{"upper", "work", "merged"} {
+			if err := os.MkdirAll(d+"/"+sub, 0o755); err != nil {
+				return fmt.Errorf("mkdir overlay: %w", err)
+			}
+		}
+	}
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir workspace: %w", err)
+	}
+
+	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work",
+		overlayDir+"/merged",
+	)
+	if err := overlayCmd.Start(); err != nil {
+		return fmt.Errorf("start system overlayfs: %w", err)
+	}
+
+	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work",
+		runnerOverlayDir+"/merged",
+	)
+	if err := runnerOverlayCmd.Start(); err != nil {
+		_ = overlayCmd.Process.Kill()
+		return fmt.Errorf("start runner overlayfs: %w", err)
+	}
+
+	r := &runner.Runner{
+		Name:      name,
+		JITConfig: jit.EncodedJITConfig,
+		WorkDir:   workspaceDir,
+	}
+
+	if err := runner.Launch(ctx, r); err != nil {
+		_ = overlayCmd.Process.Kill()
+		_ = runnerOverlayCmd.Process.Kill()
+		return fmt.Errorf("launch runner: %w", err)
+	}
+
+	s.runners[name] = r
+	s.logger.Info("runner started", slog.String("name", name))
+	return nil
+}

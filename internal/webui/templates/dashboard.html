@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runner Listener</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; background: #111; color: #eee; }
+  h1 { font-size: 1.5rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+  th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #333; }
+  th { color: #888; font-weight: 600; }
+  .bar { height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; background: #4f8; border-radius: 4px; transition: width 0.3s; }
+  .empty { color: #666; text-align: center; padding: 3rem; }
+</style>
+</head>
+<body>
+<h1>actions-runner-processor</h1>
+<div id="app"><p class="empty">Loading...</p></div>
+<script>
+async function load() {
+  const res = await fetch('/api/status');
+  const items = await res.json();
+  if (!items.length) {
+    document.getElementById('app').innerHTML = '<p class="empty">No scale sets active.</p>';
+    return;
+  }
+  let html = '<table><tr><th>Scope</th><th>Runners</th><th>Utilization</th></tr>';
+  for (const s of items) {
+    const pct = s.max_runners ? Math.round(s.active_runners / s.max_runners * 100) : 0;
+    html += `<tr>
+      <td>${s.scope}</td>
+      <td>${s.active_runners} / ${s.max_runners}</td>
+      <td><div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div></td>
+    </tr>`;
+  }
+  html += '</table>';
+  document.getElementById('app').innerHTML = html;
+}
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

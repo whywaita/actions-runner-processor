@@ -1,0 +1,4 @@
+# tagpr configuration
+[tagpr]
+  vPrefix = true
+  releaseBranch = main

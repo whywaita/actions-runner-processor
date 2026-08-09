@@ -1,0 +1,66 @@
+name: build
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+      - name: Install bubblewrap + fuse-overlayfs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap fuse-overlayfs
+      - name: Verify bwrap sandbox
+        run: |
+          bwrap --version
+          # Check if unprivileged user namespaces work
+          if bwrap --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
+            echo "bwrap sandbox OK (unprivileged)"
+          else
+            echo "unprivileged bwrap requires sudo on GitHub Actions, testing with sudo..."
+            sudo bwrap --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true
+            echo "bwrap sandbox OK (sudo)"
+          fi
+      - name: Verify fuse-overlayfs
+        run: |
+          mkdir -p /tmp/overlay-test/{lower,upper,work,merged}
+          echo "lower" > /tmp/overlay-test/lower/test.txt
+          fuse-overlayfs \
+            -o lowerdir=/tmp/overlay-test/lower,upperdir=/tmp/overlay-test/upper,workdir=/tmp/overlay-test/work \
+            /tmp/overlay-test/merged &
+          OVERLAY_PID=$!
+          sleep 1
+          cat /tmp/overlay-test/merged/test.txt
+          fusermount -u /tmp/overlay-test/merged
+          wait $OVERLAY_PID 2>/dev/null
+          rm -rf /tmp/overlay-test
+          echo "fuse-overlayfs OK"
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test ./... -v -race
+      - name: Vet
+        run: go vet ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+      - uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
+        with:
+          version: v2.12
+          install-mode: go-install
+          args: --timeout=5m
