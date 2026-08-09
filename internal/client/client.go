@@ -30,7 +30,14 @@ type GitHubAuth struct {
 }
 
 // DiscoverInstallations fetches all installations for a GitHub App and resolves
-// each installation's scope (org or repo URL).
+// each installation's scope.
+//
+// For Organization installations, returns a single entry with the org scope
+// (e.g. https://github.com/my-org). For User installations, expands into
+// per-repository scopes (e.g. https://github.com/user/repo) because the
+// scaleset SDK's registration-token path uses /orgs/ which does not work
+// for personal accounts.
+//
 // baseURL is the GitHub instance URL (default: https://github.com).
 // For GHES, set to the enterprise server URL (e.g. https://github.mycompany.com).
 func DiscoverInstallations(ctx context.Context, auth GitHubAuth, baseURL string) ([]Installation, error) {
@@ -74,17 +81,112 @@ func DiscoverInstallations(ctx context.Context, auth GitHubAuth, baseURL string)
 
 	var installations []Installation
 	for _, inst := range result {
-		scope, err := resolveScope(inst, baseURL)
-		if err != nil {
-			return nil, fmt.Errorf("installation %d: %w", inst.ID, err)
+		switch inst.Account.Type {
+		case "User":
+			// Expand User installations to per-repository scopes.
+			// The scaleset SDK treats single-path URLs as org scope and calls
+			// /orgs/{name}/actions/runners/registration-token, which 404s for
+			// personal accounts. Using repo-level scopes works around this.
+			repos, err := fetchInstallationRepositories(ctx, inst.ID, apiURL, jwtToken)
+			if err != nil {
+				return nil, fmt.Errorf("installation %d: fetch repos: %w", inst.ID, err)
+			}
+			for _, repo := range repos {
+				installations = append(installations, Installation{
+					ID:    inst.ID,
+					Scope: fmt.Sprintf("%s/%s/%s", baseURL, inst.Account.Login, repo),
+				})
+			}
+		default:
+			scope, err := resolveScope(inst, baseURL)
+			if err != nil {
+				return nil, fmt.Errorf("installation %d: %w", inst.ID, err)
+			}
+			installations = append(installations, Installation{
+				ID:    inst.ID,
+				Scope: scope,
+			})
 		}
-		installations = append(installations, Installation{
-			ID:    inst.ID,
-			Scope: scope,
-		})
 	}
 
 	return installations, nil
+}
+
+// fetchInstallationRepositories returns the full_name (owner/repo) of all
+// repositories accessible to the given installation.
+func fetchInstallationRepositories(ctx context.Context, installationID int64, apiURL, jwtToken string) ([]string, error) {
+	// First, get an installation access token.
+	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/app/installations/%d/access_tokens", apiURL, installationID), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create token request: %w", err)
+	}
+	tokenReq.Header.Set("Authorization", "Bearer "+jwtToken)
+	tokenReq.Header.Set("Accept", "application/vnd.github+json")
+
+	tokenResp, err := http.DefaultClient.Do(tokenReq)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token: %w", err)
+	}
+	defer func() { _ = tokenResp.Body.Close() }()
+
+	if tokenResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(tokenResp.Body)
+		return nil, fmt.Errorf("get installation token: %s (status %d)", string(body), tokenResp.StatusCode)
+	}
+
+	var tokenData struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(tokenResp.Body).Decode(&tokenData); err != nil {
+		return nil, fmt.Errorf("decode token: %w", err)
+	}
+
+	// Now fetch repositories for this installation.
+	var allRepos []string
+	page := 1
+	for {
+		repoReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			fmt.Sprintf("%s/installation/repositories?per_page=100&page=%d", apiURL, page), nil)
+		if err != nil {
+			return nil, fmt.Errorf("create repos request: %w", err)
+		}
+		repoReq.Header.Set("Authorization", "Bearer "+tokenData.Token)
+		repoReq.Header.Set("Accept", "application/vnd.github+json")
+
+		repoResp, err := http.DefaultClient.Do(repoReq)
+		if err != nil {
+			return nil, fmt.Errorf("list repos: %w", err)
+		}
+
+		if repoResp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(repoResp.Body)
+			_ = repoResp.Body.Close()
+			return nil, fmt.Errorf("list repos: %s (status %d)", string(body), repoResp.StatusCode)
+		}
+
+		var reposData struct {
+			Repositories []struct {
+				FullName string `json:"full_name"`
+			} `json:"repositories"`
+		}
+		if err := json.NewDecoder(repoResp.Body).Decode(&reposData); err != nil {
+			_ = repoResp.Body.Close()
+			return nil, fmt.Errorf("decode repos: %w", err)
+		}
+		_ = repoResp.Body.Close()
+
+		for _, r := range reposData.Repositories {
+			allRepos = append(allRepos, r.FullName)
+		}
+
+		if len(reposData.Repositories) < 100 {
+			break
+		}
+		page++
+	}
+
+	return allRepos, nil
 }
 
 // NewClient creates a new scaleset.Client scoped to a specific org/repo.
