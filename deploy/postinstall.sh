@@ -6,6 +6,12 @@ if ! id -u actions-runner-processor >/dev/null 2>&1; then
     useradd -r -s /bin/false actions-runner-processor
 fi
 
+# Enable user_allow_other in fuse.conf so bwrap (root) can access
+# fuse-overlayfs mounts created by the actions-runner-processor user.
+if [ -f /etc/fuse.conf ]; then
+    sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
+fi
+
 # Create directories
 mkdir -p /opt/runner/{actions-runner,workspaces,overlays}
 chown -R actions-runner-processor:actions-runner-processor /opt/runner
