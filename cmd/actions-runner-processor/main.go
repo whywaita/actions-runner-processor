@@ -35,8 +35,8 @@ func main() {
 	setupLogging(cfg.LogFormat)
 
 	// Verify runtime prerequisites before starting listeners.
-	if err := preflight(); err != nil {
-		slog.Error("preflight check failed", "error", err)
+	if perr := preflight(); perr != nil {
+		slog.Error("preflight check failed", "error", perr)
 		os.Exit(1)
 	}
 
