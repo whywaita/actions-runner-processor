@@ -3,6 +3,7 @@
 package scaler
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -156,18 +157,22 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 
 	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
 		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work",
-		"-o", "allow_root",
+		"-o", "allow_other",
 		overlayDir+"/merged",
 	)
+	var overlayStderr bytes.Buffer
+	overlayCmd.Stderr = &overlayStderr
 	if err := overlayCmd.Start(); err != nil {
 		return fmt.Errorf("start system overlayfs: %w", err)
 	}
 
 	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
 		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work",
-		"-o", "allow_root",
+		"-o", "allow_other",
 		runnerOverlayDir+"/merged",
 	)
+	var runnerOverlayStderr bytes.Buffer
+	runnerOverlayCmd.Stderr = &runnerOverlayStderr
 	if err := runnerOverlayCmd.Start(); err != nil {
 		_ = overlayCmd.Process.Kill()
 		return fmt.Errorf("start runner overlayfs: %w", err)
@@ -177,11 +182,17 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	// bwrap needs to access the merged directories, and the FUSE mount setup is
 	// asynchronous — cmd.Start() returns before the mount is fully ready.
 	if err := waitForPath(overlayDir+"/merged/usr", 5*time.Second); err != nil {
+		s.logger.Error("system overlay mount failed",
+			slog.String("stderr", overlayStderr.String()),
+		)
 		_ = overlayCmd.Process.Kill()
 		_ = runnerOverlayCmd.Process.Kill()
 		return fmt.Errorf("wait for system overlay mount: %w", err)
 	}
 	if err := waitForPath(runnerOverlayDir+"/merged/run.sh", 5*time.Second); err != nil {
+		s.logger.Error("runner overlay mount failed",
+			slog.String("stderr", runnerOverlayStderr.String()),
+		)
 		_ = overlayCmd.Process.Kill()
 		_ = runnerOverlayCmd.Process.Kill()
 		return fmt.Errorf("wait for runner overlay mount: %w", err)
