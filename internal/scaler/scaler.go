@@ -156,6 +156,7 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	}
 
 	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+		"-f",
 		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work",
 		"-o", "allow_other",
 		overlayDir+"/merged",
@@ -167,6 +168,7 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	}
 
 	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+		"-f",
 		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work",
 		"-o", "allow_other",
 		runnerOverlayDir+"/merged",
