@@ -100,23 +100,30 @@ func main() {
 				return
 			}
 
-			scaleSet, err := sClient.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
-				Name:          cfg.ScaleSetName,
-				RunnerGroupID: 1,
-				Labels:        []scaleset.Label{{Name: cfg.ScaleSetName, Type: "System"}},
-				RunnerSetting: scaleset.RunnerSetting{
-					DisableUpdate: true,
-				},
-			})
+			// Reuse an existing scale set if one exists, to avoid orphaning
+			// queued jobs that were assigned before a restart.
+			scaleSet, err := sClient.GetRunnerScaleSet(ctx, 1, cfg.ScaleSetName)
 			if err != nil {
-				logger.Error("failed to create scale set", "error", err)
+				logger.Error("failed to get scale set", "error", err)
 				return
 			}
-			defer func() {
-				if delErr := sClient.DeleteRunnerScaleSet(context.Background(), scaleSet.ID); delErr != nil {
-					logger.Error("failed to delete scale set", "error", delErr)
+			if scaleSet == nil {
+				scaleSet, err = sClient.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
+					Name:          cfg.ScaleSetName,
+					RunnerGroupID: 1,
+					Labels:        []scaleset.Label{{Name: cfg.ScaleSetName, Type: "System"}},
+					RunnerSetting: scaleset.RunnerSetting{
+						DisableUpdate: true,
+					},
+				})
+				if err != nil {
+					logger.Error("failed to create scale set", "error", err)
+					return
 				}
-			}()
+				logger.Info("scale set created", "scaleSetID", scaleSet.ID)
+			} else {
+				logger.Info("reusing existing scale set", "scaleSetID", scaleSet.ID)
+			}
 
 			sClient.SetSystemInfo(scaleset.SystemInfo{
 				System:     "actions-runner-processor",
