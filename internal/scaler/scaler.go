@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/google/uuid"
@@ -154,20 +155,35 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	}
 
 	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
-		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work",
+		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work,allow_other",
 		overlayDir+"/merged",
 	)
+	overlayCmd.Stderr = os.Stderr
 	if err := overlayCmd.Start(); err != nil {
 		return fmt.Errorf("start system overlayfs: %w", err)
 	}
 
+	// Wait for system overlay mount to be ready
+	if err := waitForMount(overlayDir+"/merged/usr", 10); err != nil {
+		_ = overlayCmd.Process.Kill()
+		return fmt.Errorf("wait for system overlay mount: %w", err)
+	}
+
 	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
-		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work",
+		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work,allow_other",
 		runnerOverlayDir+"/merged",
 	)
+	runnerOverlayCmd.Stderr = os.Stderr
 	if err := runnerOverlayCmd.Start(); err != nil {
 		_ = overlayCmd.Process.Kill()
 		return fmt.Errorf("start runner overlayfs: %w", err)
+	}
+
+	// Wait for runner overlay mount to be ready
+	if err := waitForMount(runnerOverlayDir+"/merged/run.sh", 10); err != nil {
+		_ = overlayCmd.Process.Kill()
+		_ = runnerOverlayCmd.Process.Kill()
+		return fmt.Errorf("wait for runner overlay mount: %w", err)
 	}
 
 	r := &runner.Runner{
@@ -185,4 +201,16 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	s.runners[name] = r
 	s.logger.Info("runner started", slog.String("name", name))
 	return nil
+}
+
+// waitForMount polls for path existence, returning after it appears or timeout.
+func waitForMount(path string, timeoutSec int) error {
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for %s after %ds", path, timeoutSec)
 }
