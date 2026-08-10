@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -155,24 +156,26 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		return fmt.Errorf("mkdir workspace: %w", err)
 	}
 
-	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+	overlayCmd := exec.Command("fuse-overlayfs",
 		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work",
 		"-o", "allow_other",
 		overlayDir+"/merged",
 	)
 	var overlayStderr bytes.Buffer
 	overlayCmd.Stderr = &overlayStderr
+	overlayCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := overlayCmd.Start(); err != nil {
 		return fmt.Errorf("start system overlayfs: %w", err)
 	}
 
-	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+	runnerOverlayCmd := exec.Command("fuse-overlayfs",
 		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work",
 		"-o", "allow_other",
 		runnerOverlayDir+"/merged",
 	)
 	var runnerOverlayStderr bytes.Buffer
 	runnerOverlayCmd.Stderr = &runnerOverlayStderr
+	runnerOverlayCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := runnerOverlayCmd.Start(); err != nil {
 		_ = overlayCmd.Process.Kill()
 		_ = overlayCmd.Wait() // reap to avoid zombies
