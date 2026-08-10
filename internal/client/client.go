@@ -94,7 +94,7 @@ func DiscoverInstallations(ctx context.Context, auth GitHubAuth, baseURL string)
 			for _, repo := range repos {
 				installations = append(installations, Installation{
 					ID:    inst.ID,
-					Scope: fmt.Sprintf("%s/%s/%s", baseURL, inst.Account.Login, repo),
+					Scope: fmt.Sprintf("%s/%s", baseURL, repo),
 				})
 			}
 		default:
