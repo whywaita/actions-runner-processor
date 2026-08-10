@@ -5,7 +5,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -21,13 +21,17 @@ import (
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
 	}
+
+	// Set up structured logging with configurable format.
+	setupLogging(cfg.LogFormat)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	auth := client.GitHubAuth{
 		ClientID:   cfg.GitHub.ClientID,
@@ -37,10 +41,11 @@ func main() {
 
 	installations, err := client.DiscoverInstallations(ctx, auth, cfg.GitHub.URL)
 	if err != nil {
-		log.Fatalf("failed to discover installations: %v", err)
+		slog.Error("failed to discover installations", "error", err)
+		os.Exit(1)
 	}
 
-	log.Printf("discovered %d installation(s)", len(installations))
+	slog.Info("discovered installations", "count", len(installations))
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -55,7 +60,7 @@ func main() {
 	if cfg.Metrics.Enabled {
 		go func() {
 			if err := metrics.Serve(ctx, cfg.Metrics.Addr, registry); err != nil {
-				log.Printf("metrics server: %v", err)
+				slog.Error("metrics server error", "error", err)
 			}
 		}()
 	}
@@ -63,7 +68,7 @@ func main() {
 	if cfg.WebUI.Enabled {
 		go func() {
 			if err := webui.Serve(ctx, cfg.WebUI.Addr, webRegistry); err != nil {
-				log.Printf("webui server: %v", err)
+				slog.Error("webui server error", "error", err)
 			}
 		}()
 	}
@@ -75,7 +80,8 @@ func main() {
 		go func(inst client.Installation) {
 			defer wg.Done()
 
-			log.Printf("[%d] creating scale set %q in %s", inst.ID, cfg.ScaleSetName, inst.Scope)
+			logger := slog.With("installationID", inst.ID, "scope", inst.Scope)
+			logger.Info("creating scale set", "name", cfg.ScaleSetName)
 
 			sClient, err := scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
 				GitHubConfigURL: inst.Scope,
@@ -90,7 +96,7 @@ func main() {
 				},
 			})
 			if err != nil {
-				log.Printf("[%d] failed to create scaleset client: %v", inst.ID, err)
+				logger.Error("failed to create scaleset client", "error", err)
 				return
 			}
 
@@ -103,24 +109,24 @@ func main() {
 				},
 			})
 			if err != nil {
-				log.Printf("[%d] failed to create scale set: %v", inst.ID, err)
+				logger.Error("failed to create scale set", "error", err)
 				return
 			}
 			defer func() {
 				if delErr := sClient.DeleteRunnerScaleSet(context.Background(), scaleSet.ID); delErr != nil {
-					log.Printf("[%d] failed to delete scale set: %v", inst.ID, delErr)
+					logger.Error("failed to delete scale set", "error", delErr)
 				}
 			}()
 
 			sClient.SetSystemInfo(scaleset.SystemInfo{
-				System:    "actions-runner-processor",
-				Subsystem: "listener",
+				System:     "actions-runner-processor",
+				Subsystem:  "listener",
 				ScaleSetID: scaleSet.ID,
 			})
 
 			session, err := sClient.MessageSessionClient(ctx, scaleSet.ID, hostname)
 			if err != nil {
-				log.Printf("[%d] failed to create message session: %v", inst.ID, err)
+				logger.Error("failed to create message session", "error", err)
 				return
 			}
 			defer func() { _ = session.Close(context.Background()) }()
@@ -134,18 +140,36 @@ func main() {
 				MaxRunners: maxRunners,
 			})
 			if err != nil {
-				log.Printf("[%d] failed to create listener: %v", inst.ID, err)
+				logger.Error("failed to create listener", "error", err)
 				return
 			}
 
-			log.Printf("[%d] listener started (scaleSetID=%d, maxRunners=%d)", inst.ID, scaleSet.ID, maxRunners)
+			logger.Info("listener started", "scaleSetID", scaleSet.ID, "maxRunners", maxRunners)
 
 			if err := l.Run(ctx, s); err != nil && err != context.Canceled {
-				log.Printf("[%d] listener error: %v", inst.ID, err)
+				logger.Error("listener error", "error", err)
 			}
 		}(inst)
 	}
 
 	wg.Wait()
-	log.Println("all listeners stopped")
+	slog.Info("all listeners stopped")
+}
+
+// setupLogging configures the default slog handler based on logFormat.
+// Supported values: "text" (default), "json".
+func setupLogging(format string) {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}
+
+	var handler slog.Handler
+	switch format {
+	case "json":
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	default:
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+
+	slog.SetDefault(slog.New(handler))
 }

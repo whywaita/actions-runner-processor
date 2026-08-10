@@ -184,5 +184,29 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 
 	s.runners[name] = r
 	s.logger.Info("runner started", slog.String("name", name))
+
+	// Monitor the runner process. If it exits without completing a job
+	// (crash, OOM, JIT expiry, etc.), remove it from the tracked set so
+	// HandleDesiredRunnerCount can launch a replacement.
+	go func() {
+		if err := r.Wait(); err != nil {
+			s.logger.Warn("runner exited with error",
+				slog.String("name", name),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			s.logger.Info("runner exited normally", slog.String("name", name))
+		}
+
+		s.mu.Lock()
+		if _, ok := s.runners[name]; ok {
+			delete(s.runners, name)
+		}
+		s.mu.Unlock()
+
+		// Clean up overlay processes that may still be mounted.
+		_ = overlayCmd.Process.Kill()
+		_ = runnerOverlayCmd.Process.Kill()
+	}()
 	return nil
 }
