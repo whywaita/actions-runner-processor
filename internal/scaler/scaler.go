@@ -3,7 +3,6 @@
 package scaler
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -155,47 +154,40 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		return fmt.Errorf("mkdir workspace: %w", err)
 	}
 
-	// Use setsid to properly daemonize fuse-overlayfs, detaching it from
-	// the Go process's session. This matches what a shell does with "&".
-	overlayCmd := exec.Command("setsid", "fuse-overlayfs",
-		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work",
-		"-o", "allow_other",
-		overlayDir+"/merged",
+	// Use bash -c to spawn fuse-overlayfs exactly as the manual shell test does.
+	sysCmd := fmt.Sprintf(
+		"fuse-overlayfs -o lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
+		overlayDir, overlayDir, overlayDir,
 	)
-	var overlayStderr bytes.Buffer
-	overlayCmd.Stderr = &overlayStderr
+	overlayCmd := exec.Command("/bin/bash", "-c", sysCmd)
+	overlayCmd.Stdin = nil
 	if err := overlayCmd.Start(); err != nil {
 		return fmt.Errorf("start system overlayfs: %w", err)
 	}
+	// bash -c with & returns immediately; reap to avoid zombie.
+	go func() { _ = overlayCmd.Wait() }()
 
-	runnerOverlayCmd := exec.Command("setsid", "fuse-overlayfs",
-		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work",
-		"-o", "allow_other",
-		runnerOverlayDir+"/merged",
+	runnerCmd := fmt.Sprintf(
+		"fuse-overlayfs -o lowerdir=/opt/runner/actions-runner,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
+		runnerOverlayDir, runnerOverlayDir, runnerOverlayDir,
 	)
-	var runnerOverlayStderr bytes.Buffer
-	runnerOverlayCmd.Stderr = &runnerOverlayStderr
+	runnerOverlayCmd := exec.Command("/bin/bash", "-c", runnerCmd)
+	runnerOverlayCmd.Stdin = nil
 	if err := runnerOverlayCmd.Start(); err != nil {
 		_ = overlayCmd.Process.Kill()
-		_ = overlayCmd.Wait() // reap to avoid zombies
 		return fmt.Errorf("start runner overlayfs: %w", err)
 	}
+	go func() { _ = runnerOverlayCmd.Wait() }()
 
 	// Wait for fuse-overlayfs mounts to become available before launching the runner.
 	// fuse-overlayfs daemonizes after cmd.Start() and the FUSE mount may take a
 	// moment to become ready.
 	if err := waitForPath(overlayDir+"/merged/usr", 10*time.Second); err != nil {
-		s.logger.Error("system overlay mount failed",
-			slog.String("stderr", overlayStderr.String()),
-		)
 		_ = overlayCmd.Process.Kill()
 		_ = runnerOverlayCmd.Process.Kill()
 		return fmt.Errorf("wait for system overlay mount: %w", err)
 	}
 	if err := waitForPath(runnerOverlayDir+"/merged/run.sh", 10*time.Second); err != nil {
-		s.logger.Error("runner overlay mount failed",
-			slog.String("stderr", runnerOverlayStderr.String()),
-		)
 		_ = overlayCmd.Process.Kill()
 		_ = runnerOverlayCmd.Process.Kill()
 		return fmt.Errorf("wait for runner overlay mount: %w", err)
