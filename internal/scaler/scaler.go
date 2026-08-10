@@ -156,7 +156,6 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	}
 
 	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
-		"-f",
 		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work",
 		"-o", "allow_other",
 		overlayDir+"/merged",
@@ -168,7 +167,6 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	}
 
 	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
-		"-f",
 		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work",
 		"-o", "allow_other",
 		runnerOverlayDir+"/merged",
@@ -177,13 +175,14 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	runnerOverlayCmd.Stderr = &runnerOverlayStderr
 	if err := runnerOverlayCmd.Start(); err != nil {
 		_ = overlayCmd.Process.Kill()
+		_ = overlayCmd.Wait() // reap to avoid zombies
 		return fmt.Errorf("start runner overlayfs: %w", err)
 	}
 
 	// Wait for fuse-overlayfs mounts to become available before launching the runner.
-	// bwrap needs to access the merged directories, and the FUSE mount setup is
-	// asynchronous — cmd.Start() returns before the mount is fully ready.
-	if err := waitForPath(overlayDir+"/merged/usr", 5*time.Second); err != nil {
+	// fuse-overlayfs daemonizes after cmd.Start() and the FUSE mount may take a
+	// moment to become ready.
+	if err := waitForPath(overlayDir+"/merged/usr", 10*time.Second); err != nil {
 		s.logger.Error("system overlay mount failed",
 			slog.String("stderr", overlayStderr.String()),
 		)
@@ -191,7 +190,7 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		_ = runnerOverlayCmd.Process.Kill()
 		return fmt.Errorf("wait for system overlay mount: %w", err)
 	}
-	if err := waitForPath(runnerOverlayDir+"/merged/run.sh", 5*time.Second); err != nil {
+	if err := waitForPath(runnerOverlayDir+"/merged/run.sh", 10*time.Second); err != nil {
 		s.logger.Error("runner overlay mount failed",
 			slog.String("stderr", runnerOverlayStderr.String()),
 		)
