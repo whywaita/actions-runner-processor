@@ -165,10 +165,10 @@ func setupLogging(format string) {
 
 	var handler slog.Handler
 	switch format {
-	case "json":
-		handler = slog.NewJSONHandler(os.Stderr, opts)
-	default:
+	case "text":
 		handler = slog.NewTextHandler(os.Stderr, opts)
+	default:
+		handler = slog.NewJSONHandler(os.Stderr, opts)
 	}
 
 	slog.SetDefault(slog.New(handler))

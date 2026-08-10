@@ -108,7 +108,7 @@ func Load() (*Config, error) {
 		cfg.GitHub.URL = "https://github.com"
 	}
 	if cfg.LogFormat == "" {
-		cfg.LogFormat = "text"
+		cfg.LogFormat = "json"
 	}
 
 	return &cfg, nil
