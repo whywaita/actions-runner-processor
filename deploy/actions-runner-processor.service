@@ -6,7 +6,6 @@ Wants=network-online.target
 [Service]
 User=actions-runner-processor
 Group=actions-runner-processor
-SupplementaryGroups=fuse
 ExecStart=/usr/bin/actions-runner-processor
 Restart=always
 RestartSec=10
