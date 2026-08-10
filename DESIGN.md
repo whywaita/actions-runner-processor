@@ -470,7 +470,7 @@ func (cfg Config) ResolveMaxRunners() int {
 
 ```bash
 # 1. 依存パッケージ
-apt install bubblewrap fuse-overlayfs
+apt install bubblewrap fuse-overlayfs fuse
 
 # 2. actions/runner の展開（起動時に runner-listener が自動で行う）
 #    version: "latest" → GitHub API で最新バージョンを解決 → ダウンロード

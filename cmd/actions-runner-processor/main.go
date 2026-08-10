@@ -200,6 +200,7 @@ func preflight() error {
 	}{
 		{"bwrap binary", checkBinary("bwrap")},
 		{"fuse-overlayfs binary", checkBinary("fuse-overlayfs")},
+		{"/dev/fuse", checkDevFuse},
 		{"fuse.conf user_allow_other", checkFuseConf},
 		{"actions-runner directory /opt/runner/actions-runner", checkDir("/opt/runner/actions-runner")},
 		{"workspaces directory /opt/runner/workspaces", checkDir("/opt/runner/workspaces")},
@@ -257,4 +258,11 @@ func checkFuseConf() error {
 		return fmt.Errorf("error reading /etc/fuse.conf: %w", err)
 	}
 	return fmt.Errorf("user_allow_other is not enabled in /etc/fuse.conf (uncomment the line)")
+}
+
+func checkDevFuse() error {
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		return fmt.Errorf("/dev/fuse not found — install the 'fuse' package (apt install fuse)")
+	}
+	return nil
 }

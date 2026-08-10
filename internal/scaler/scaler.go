@@ -154,35 +154,27 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		return fmt.Errorf("mkdir workspace: %w", err)
 	}
 
-	// Use nohup + bash -c to spawn fuse-overlayfs. The shell's & puts it
-	// in the background, and nohup prevents SIGHUP when the shell exits.
-	sysCmd := fmt.Sprintf(
-		"nohup fuse-overlayfs -o lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
-		overlayDir, overlayDir, overlayDir,
+	// Spawn fuse-overlayfs directly. It daemonizes on its own — no shell wrapper needed.
+	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work,allow_other",
+		overlayDir+"/merged",
 	)
-	overlayCmd := exec.Command("/bin/bash", "-c", sysCmd)
-	overlayCmd.Stdin = nil
+	overlayCmd.Stderr = os.Stderr
 	if err := overlayCmd.Start(); err != nil {
 		return fmt.Errorf("start system overlayfs: %w", err)
 	}
-	// bash -c with & returns immediately; reap to avoid zombie.
-	go func() { _ = overlayCmd.Wait() }()
 
-	runnerCmd := fmt.Sprintf(
-		"nohup fuse-overlayfs -o lowerdir=/opt/runner/actions-runner,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
-		runnerOverlayDir, runnerOverlayDir, runnerOverlayDir,
+	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
+		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work,allow_other",
+		runnerOverlayDir+"/merged",
 	)
-	runnerOverlayCmd := exec.Command("/bin/bash", "-c", runnerCmd)
-	runnerOverlayCmd.Stdin = nil
+	runnerOverlayCmd.Stderr = os.Stderr
 	if err := runnerOverlayCmd.Start(); err != nil {
 		_ = overlayCmd.Process.Kill()
 		return fmt.Errorf("start runner overlayfs: %w", err)
 	}
-	go func() { _ = runnerOverlayCmd.Wait() }()
 
 	// Wait for fuse-overlayfs mounts to become available before launching the runner.
-	// fuse-overlayfs daemonizes after cmd.Start() and the FUSE mount may take a
-	// moment to become ready.
 	if err := waitForPath(overlayDir+"/merged/usr", 10*time.Second); err != nil {
 		_ = overlayCmd.Process.Kill()
 		_ = runnerOverlayCmd.Process.Kill()
