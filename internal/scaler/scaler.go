@@ -154,9 +154,10 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		return fmt.Errorf("mkdir workspace: %w", err)
 	}
 
-	// Use bash -c to spawn fuse-overlayfs exactly as the manual shell test does.
+	// Use nohup + bash -c to spawn fuse-overlayfs. The shell's & puts it
+	// in the background, and nohup prevents SIGHUP when the shell exits.
 	sysCmd := fmt.Sprintf(
-		"fuse-overlayfs -o lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
+		"nohup fuse-overlayfs -o lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
 		overlayDir, overlayDir, overlayDir,
 	)
 	overlayCmd := exec.Command("/bin/bash", "-c", sysCmd)
@@ -168,7 +169,7 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	go func() { _ = overlayCmd.Wait() }()
 
 	runnerCmd := fmt.Sprintf(
-		"fuse-overlayfs -o lowerdir=/opt/runner/actions-runner,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
+		"nohup fuse-overlayfs -o lowerdir=/opt/runner/actions-runner,upperdir=%s/upper,workdir=%s/work -o allow_other %s/merged &",
 		runnerOverlayDir, runnerOverlayDir, runnerOverlayDir,
 	)
 	runnerOverlayCmd := exec.Command("/bin/bash", "-c", runnerCmd)
