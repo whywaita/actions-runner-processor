@@ -190,9 +190,11 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	// HandleDesiredRunnerCount can launch a replacement.
 	go func() {
 		if err := r.Wait(); err != nil {
+			stderr := r.StderrOutput()
 			s.logger.Warn("runner exited with error",
 				slog.String("name", name),
 				slog.String("error", err.Error()),
+				slog.String("stderr", stderr),
 			)
 		} else {
 			s.logger.Info("runner exited normally", slog.String("name", name))

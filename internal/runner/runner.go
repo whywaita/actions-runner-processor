@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -14,7 +15,8 @@ type Runner struct {
 	JITConfig string
 	WorkDir   string
 
-	cmd *exec.Cmd
+	cmd    *exec.Cmd
+	stderr *bytes.Buffer
 }
 
 // Launch starts a runner inside a bubblewrap sandbox.
@@ -47,6 +49,10 @@ func Launch(ctx context.Context, r *Runner) error {
 	cmd := exec.CommandContext(ctx, "bwrap", args...)
 	cmd.Env = append(cmd.Environ(), "ACTIONS_RUNNER_INPUT_JITCONFIG="+r.JITConfig)
 
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	r.stderr = &stderr
+
 	r.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
@@ -54,6 +60,14 @@ func Launch(ctx context.Context, r *Runner) error {
 	}
 
 	return nil
+}
+
+// StderrOutput returns the captured stderr from the runner process.
+func (r *Runner) StderrOutput() string {
+	if r.stderr == nil {
+		return ""
+	}
+	return r.stderr.String()
 }
 
 // Wait blocks until the runner exits.
