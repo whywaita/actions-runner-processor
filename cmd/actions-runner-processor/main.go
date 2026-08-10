@@ -4,10 +4,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -29,6 +33,12 @@ func main() {
 
 	// Set up structured logging with configurable format.
 	setupLogging(cfg.LogFormat)
+
+	// Verify runtime prerequisites before starting listeners.
+	if err := preflight(); err != nil {
+		slog.Error("preflight check failed", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -179,4 +189,72 @@ func setupLogging(format string) {
 	}
 
 	slog.SetDefault(slog.New(handler))
+}
+
+// preflight verifies that all runtime prerequisites are met before
+// starting any listeners. Returns an error describing the first failure.
+func preflight() error {
+	checks := []struct {
+		name string
+		fn   func() error
+	}{
+		{"bwrap binary", checkBinary("bwrap")},
+		{"fuse-overlayfs binary", checkBinary("fuse-overlayfs")},
+		{"fuse.conf user_allow_other", checkFuseConf},
+		{"actions-runner directory /opt/runner/actions-runner", checkDir("/opt/runner/actions-runner")},
+		{"workspaces directory /opt/runner/workspaces", checkDir("/opt/runner/workspaces")},
+		{"overlays directory /opt/runner/overlays", checkDir("/opt/runner/overlays")},
+	}
+
+	for _, c := range checks {
+		if err := c.fn(); err != nil {
+			return fmt.Errorf("%s: %w", c.name, err)
+		}
+		slog.Info("preflight check passed", "check", c.name)
+	}
+
+	return nil
+}
+
+func checkBinary(name string) func() error {
+	return func() error {
+		_, err := exec.LookPath(name)
+		if err != nil {
+			return fmt.Errorf("%s not found in PATH", name)
+		}
+		return nil
+	}
+}
+
+func checkDir(path string) func() error {
+	return func() error {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("%s does not exist: %w", path, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", path)
+		}
+		return nil
+	}
+}
+
+func checkFuseConf() error {
+	f, err := os.Open("/etc/fuse.conf")
+	if err != nil {
+		return fmt.Errorf("cannot open /etc/fuse.conf: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "user_allow_other" {
+			return nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading /etc/fuse.conf: %w", err)
+	}
+	return fmt.Errorf("user_allow_other is not enabled in /etc/fuse.conf (uncomment the line)")
 }
