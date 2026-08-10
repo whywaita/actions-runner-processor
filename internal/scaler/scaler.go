@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/google/uuid"
@@ -170,6 +171,20 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		return fmt.Errorf("start runner overlayfs: %w", err)
 	}
 
+	// Wait for fuse-overlayfs mounts to become available before launching the runner.
+	// bwrap needs to access the merged directories, and the FUSE mount setup is
+	// asynchronous — cmd.Start() returns before the mount is fully ready.
+	if err := waitForPath(overlayDir+"/merged/usr", 5*time.Second); err != nil {
+		_ = overlayCmd.Process.Kill()
+		_ = runnerOverlayCmd.Process.Kill()
+		return fmt.Errorf("wait for system overlay mount: %w", err)
+	}
+	if err := waitForPath(runnerOverlayDir+"/merged/run.sh", 5*time.Second); err != nil {
+		_ = overlayCmd.Process.Kill()
+		_ = runnerOverlayCmd.Process.Kill()
+		return fmt.Errorf("wait for runner overlay mount: %w", err)
+	}
+
 	r := &runner.Runner{
 		Name:      name,
 		JITConfig: jit.EncodedJITConfig,
@@ -209,4 +224,16 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		_ = runnerOverlayCmd.Process.Kill()
 	}()
 	return nil
+}
+
+// waitForPath polls until the given path exists or the timeout expires.
+func waitForPath(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for %s after %v", path, timeout)
 }
