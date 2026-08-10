@@ -18,6 +18,15 @@ if [ -f /etc/fuse.conf ]; then
     sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
 fi
 
+# Relax AppArmor unprivileged user namespace restriction (Ubuntu 24.04+ / kernel 6.8+).
+# fuse-overlayfs needs this for non-root FUSE mounts.
+if [ -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+    sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+fi
+if [ -d /etc/sysctl.d ]; then
+    echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/99-fuse-userns.conf
+fi
+
 # Create directories
 mkdir -p /opt/runner/actions-runner /opt/runner/workspaces /opt/runner/overlays
 
