@@ -18,7 +18,7 @@ if [ -f /etc/fuse.conf ]; then
 fi
 
 # Create directories
-mkdir -p /opt/runner/{actions-runner,workspaces,overlays}
+mkdir -p /opt/runner/actions-runner /opt/runner/workspaces /opt/runner/overlays
 
 # Clean up stale FUSE mounts from previous crashes before chown
 for d in /opt/runner/overlays/*/merged; do
