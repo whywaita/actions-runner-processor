@@ -29,6 +29,10 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
+	if err := preflight(); err != nil {
+		log.Fatalf("preflight: %v", err)
+	}
+
 	auth := client.GitHubAuth{
 		ClientID:   cfg.GitHub.ClientID,
 		PrivateKey: cfg.GitHub.PrivateKey,

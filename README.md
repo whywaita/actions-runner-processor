@@ -45,7 +45,7 @@ sandboxes.
 
 ```bash
 # Dependencies
-apt install bubblewrap fuse-overlayfs
+apt install bubblewrap fuse-overlayfs fuse
 
 # Download and extract GitHub Actions runner binary
 mkdir -p /opt/runner/actions-runner
