@@ -199,9 +199,7 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		}
 
 		s.mu.Lock()
-		if _, ok := s.runners[name]; ok {
-			delete(s.runners, name)
-		}
+		delete(s.runners, name)
 		s.mu.Unlock()
 
 		// Clean up overlay processes that may still be mounted.
