@@ -19,6 +19,14 @@ fi
 
 # Create directories
 mkdir -p /opt/runner/{actions-runner,workspaces,overlays}
+
+# Clean up stale FUSE mounts from previous crashes before chown
+for d in /opt/runner/overlays/*/merged; do
+    fusermount -u "$d" 2>/dev/null || umount -l "$d" 2>/dev/null || true
+done
+# Remove stale overlay directories from crashed runs
+find /opt/runner/overlays -maxdepth 1 -name 'runner-*' -exec rm -rf {} + 2>/dev/null || true
+
 chown -R actions-runner-processor:actions-runner-processor /opt/runner
 
 # Set permissions
