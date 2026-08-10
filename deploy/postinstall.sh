@@ -7,9 +7,10 @@ if ! id -u actions-runner-processor >/dev/null 2>&1; then
 fi
 
 # Add user to fuse group for /dev/fuse access
-if getent group fuse >/dev/null 2>&1; then
-    usermod -a -G fuse actions-runner-processor 2>/dev/null || true
+if ! getent group fuse >/dev/null 2>&1; then
+    groupadd fuse
 fi
+usermod -a -G fuse actions-runner-processor 2>/dev/null || true
 
 # Enable user_allow_other in fuse.conf so bwrap (root) can access
 # fuse-overlayfs mounts created by the actions-runner-processor user.
