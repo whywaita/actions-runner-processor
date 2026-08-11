@@ -46,7 +46,7 @@ jobs:
           fi
       - name: Verify temporary overlay
         run: |
-          bwrap \
+          sudo bwrap \
             --unshare-all \
             --share-net \
             --overlay-src /usr \
