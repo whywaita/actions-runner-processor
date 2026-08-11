@@ -5,9 +5,15 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -20,14 +26,34 @@ import (
 	"github.com/whywaita/actions-runner-processor/internal/webui"
 )
 
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+var runnerWorkspacePattern = regexp.MustCompile(`^runner-[0-9a-f]{8}$`)
 
+func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
 	}
+
+	// Set up structured logging with configurable format.
+	setupLogging(cfg.LogFormat)
+
+	// Verify runtime prerequisites before starting listeners.
+	if perr := preflight(cfg); perr != nil {
+		slog.Error("preflight check failed", "error", perr)
+		os.Exit(1)
+	}
+	removedWorkspaces, err := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
+	if err != nil {
+		slog.Error("failed to clean stale runner workspaces", "error", err)
+		os.Exit(1)
+	}
+	if removedWorkspaces > 0 {
+		slog.Info("cleaned stale runner workspaces", "count", removedWorkspaces)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	auth := client.GitHubAuth{
 		ClientID:   cfg.GitHub.ClientID,
@@ -37,10 +63,11 @@ func main() {
 
 	installations, err := client.DiscoverInstallations(ctx, auth, cfg.GitHub.URL)
 	if err != nil {
-		log.Fatalf("failed to discover installations: %v", err)
+		slog.Error("failed to discover installations", "error", err)
+		os.Exit(1)
 	}
 
-	log.Printf("discovered %d installation(s)", len(installations))
+	slog.Info("discovered installations", "count", len(installations))
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -55,7 +82,7 @@ func main() {
 	if cfg.Metrics.Enabled {
 		go func() {
 			if err := metrics.Serve(ctx, cfg.Metrics.Addr, registry); err != nil {
-				log.Printf("metrics server: %v", err)
+				slog.Error("metrics server error", "error", err)
 			}
 		}()
 	}
@@ -63,7 +90,7 @@ func main() {
 	if cfg.WebUI.Enabled {
 		go func() {
 			if err := webui.Serve(ctx, cfg.WebUI.Addr, webRegistry); err != nil {
-				log.Printf("webui server: %v", err)
+				slog.Error("webui server error", "error", err)
 			}
 		}()
 	}
@@ -75,7 +102,8 @@ func main() {
 		go func(inst client.Installation) {
 			defer wg.Done()
 
-			log.Printf("[%d] creating scale set %q in %s", inst.ID, cfg.ScaleSetName, inst.Scope)
+			logger := slog.With("installationID", inst.ID, "scope", inst.Scope)
+			logger.Info("creating scale set", "name", cfg.ScaleSetName)
 
 			sClient, err := scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
 				GitHubConfigURL: inst.Scope,
@@ -90,42 +118,57 @@ func main() {
 				},
 			})
 			if err != nil {
-				log.Printf("[%d] failed to create scaleset client: %v", inst.ID, err)
+				logger.Error("failed to create scaleset client", "error", err)
 				return
 			}
 
-			scaleSet, err := sClient.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
-				Name:          cfg.ScaleSetName,
-				RunnerGroupID: 1,
-				Labels:        []scaleset.Label{{Name: cfg.ScaleSetName, Type: "System"}},
-				RunnerSetting: scaleset.RunnerSetting{
-					DisableUpdate: true,
-				},
-			})
+			// Reuse an existing scale set if one exists, to avoid orphaning
+			// queued jobs that were assigned before a restart.
+			scaleSet, err := sClient.GetRunnerScaleSet(ctx, 1, cfg.ScaleSetName)
 			if err != nil {
-				log.Printf("[%d] failed to create scale set: %v", inst.ID, err)
+				logger.Error("failed to get scale set", "error", err)
 				return
 			}
-			defer func() {
-				if delErr := sClient.DeleteRunnerScaleSet(context.Background(), scaleSet.ID); delErr != nil {
-					log.Printf("[%d] failed to delete scale set: %v", inst.ID, delErr)
+			if scaleSet == nil {
+				scaleSet, err = sClient.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
+					Name:          cfg.ScaleSetName,
+					RunnerGroupID: 1,
+					Labels:        []scaleset.Label{{Name: cfg.ScaleSetName, Type: "System"}},
+					RunnerSetting: scaleset.RunnerSetting{
+						DisableUpdate: true,
+					},
+				})
+				if err != nil {
+					logger.Error("failed to create scale set", "error", err)
+					return
 				}
-			}()
+				logger.Info("scale set created", "scaleSetID", scaleSet.ID)
+			} else {
+				logger.Info("reusing existing scale set", "scaleSetID", scaleSet.ID)
+			}
 
 			sClient.SetSystemInfo(scaleset.SystemInfo{
-				System:    "actions-runner-processor",
-				Subsystem: "listener",
+				System:     "actions-runner-processor",
+				Subsystem:  "listener",
 				ScaleSetID: scaleSet.ID,
 			})
 
 			session, err := sClient.MessageSessionClient(ctx, scaleSet.ID, hostname)
 			if err != nil {
-				log.Printf("[%d] failed to create message session: %v", inst.ID, err)
+				logger.Error("failed to create message session", "error", err)
 				return
 			}
 			defer func() { _ = session.Close(context.Background()) }()
 
-			s := scaler.New(sClient, scaleSet.ID, maxRunners, cfg.Runner.MinRunners)
+			s := scaler.New(
+				sClient,
+				scaleSet.ID,
+				maxRunners,
+				cfg.Runner.MinRunners,
+				cfg.Runner.ActionsRunnerPath,
+				cfg.Runner.WorkspaceRoot,
+				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
+			)
 			registry.Register(inst.Scope, s)
 			webRegistry.Register(inst.Scope, s)
 
@@ -134,18 +177,125 @@ func main() {
 				MaxRunners: maxRunners,
 			})
 			if err != nil {
-				log.Printf("[%d] failed to create listener: %v", inst.ID, err)
+				logger.Error("failed to create listener", "error", err)
 				return
 			}
 
-			log.Printf("[%d] listener started (scaleSetID=%d, maxRunners=%d)", inst.ID, scaleSet.ID, maxRunners)
+			logger.Info("listener started", "scaleSetID", scaleSet.ID, "maxRunners", maxRunners)
 
 			if err := l.Run(ctx, s); err != nil && err != context.Canceled {
-				log.Printf("[%d] listener error: %v", inst.ID, err)
+				logger.Error("listener error", "error", err)
 			}
 		}(inst)
 	}
 
 	wg.Wait()
-	log.Println("all listeners stopped")
+	slog.Info("all listeners stopped")
+}
+
+// setupLogging configures the default slog handler based on logFormat.
+// Supported values: "text" (default), "json".
+func setupLogging(format string) {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}
+
+	var handler slog.Handler
+	switch format {
+	case "text":
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	default:
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	}
+
+	slog.SetDefault(slog.New(handler))
+}
+
+// preflight verifies that all runtime prerequisites are met before
+// starting any listeners. Returns an error describing the first failure.
+func preflight(cfg *config.Config) error {
+	checks := []struct {
+		name string
+		fn   func() error
+	}{
+		{"bwrap binary", checkBinary("bwrap")},
+		{"bwrap --tmp-overlay support", checkCommandOption("bwrap", "--tmp-overlay")},
+		{"actions-runner directory", checkDir(cfg.Runner.ActionsRunnerPath)},
+		{"workspaces directory", checkDir(cfg.Runner.WorkspaceRoot)},
+	}
+
+	for _, c := range checks {
+		if err := c.fn(); err != nil {
+			return fmt.Errorf("%s: %w", c.name, err)
+		}
+		slog.Info("preflight check passed", "check", c.name)
+	}
+
+	return nil
+}
+
+func checkBinary(name string) func() error {
+	return func() error {
+		_, err := exec.LookPath(name)
+		if err != nil {
+			return fmt.Errorf("%s not found in PATH", name)
+		}
+		return nil
+	}
+}
+
+func checkDir(path string) func() error {
+	return func() error {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("%s does not exist: %w", path, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", path)
+		}
+		return nil
+	}
+}
+
+func checkCommandOption(name, option string) func() error {
+	return func() error {
+		output, err := exec.Command(name, "--help").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("run %s --help: %w", name, err)
+		}
+		if !hasCommandOption(output, option) {
+			return fmt.Errorf("%s does not support %s", name, option)
+		}
+		return nil
+	}
+}
+
+func hasCommandOption(help []byte, option string) bool {
+	return slices.Contains(strings.Fields(string(help)), option)
+}
+
+func configPath() string {
+	if path := os.Getenv("CONFIG_PATH"); path != "" {
+		return path
+	}
+	return "/etc/actions-runner-processor/config.yaml"
+}
+
+func cleanupRunnerWorkspaces(root string) (int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, fmt.Errorf("read workspace root: %w", err)
+	}
+
+	removed := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !runnerWorkspacePattern.MatchString(entry.Name()) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return removed, fmt.Errorf("remove workspace %s: %w", entry.Name(), err)
+		}
+		removed++
+	}
+	return removed, nil
 }

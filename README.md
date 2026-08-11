@@ -6,7 +6,7 @@ for homelab Linux VMs.
 It uses the [actions/scaleset](https://github.com/actions/scaleset) Message
 Session API (the same protocol as ARC) to detect queued jobs and launch
 ephemeral runners inside [bubblewrap](https://github.com/containers/bubblewrap)
-sandboxes.
+sandboxes with per-runner temporary overlays.
 
 ## Overview
 
@@ -45,7 +45,7 @@ sandboxes.
 
 ```bash
 # Dependencies
-apt install bubblewrap fuse-overlayfs
+apt install bubblewrap
 
 # Download and extract GitHub Actions runner binary
 mkdir -p /opt/runner/actions-runner
@@ -107,7 +107,7 @@ when unset.
 ```bash
 # Create dedicated user
 useradd -r -s /bin/false actions-runner-processor
-mkdir -p /opt/actions-runner-processor /opt/runner/{actions-runner,workspaces,overlays}
+mkdir -p /opt/actions-runner-processor /opt/runner/{actions-runner,workspaces}
 chown -R actions-runner-processor:actions-runner-processor /opt/runner
 
 # Install binary
@@ -149,21 +149,24 @@ For detailed architecture documentation, see [DESIGN.md](DESIGN.md).
 3. Listener → AcquireJobs()
 4. Listener → job_started received
 5. Scaler → HandleDesiredRunnerCount() → startRunner()
-6. Scaler → fuse-overlayfs (CoW layers) + GenerateJitRunnerConfig()
-7. Runner → bwrap sandbox starts → JIT config registers with GitHub → runs job
+6. Scaler → GenerateJitRunnerConfig()
+7. Runner → bwrap temporary overlays start → JIT config registers with GitHub → runs job
 8. Runner → job completes → auto-deregister → sandbox destroyed
 9. Listener → job_completed received
-10. Scaler → HandleJobCompleted() → cleanup overlay/workspace
+10. Scaler → HandleJobCompleted() → cleanup workspace and runner registration
 ```
 
 ### Sandboxing
 
 Each runner is launched inside a bubblewrap sandbox:
 
-- `--unshare-all` — isolated PID, IPC, UTS, mount namespaces
-- `fuse-overlayfs` — per-job writable CoW layers for `/usr`, `/lib`, `/lib64`, `/bin`, `/etc`
+- `--unshare-all` — isolated user, PID, IPC, UTS, and mount namespaces
+- `--tmp-overlay` — per-job writable CoW layers for system directories and the runner distribution
 - `--die-with-parent` — sandbox auto-dies if the processor exits
 - `--share-net` only — runner needs outbound HTTPS to GitHub
+- The configuration file and GitHub App private key are masked with `/dev/null` inside the sandbox
+- Runner registrations are removed by ID whenever a runner process exits, including startup failures
+- Stale `runner-xxxxxxxx` workspace directories are removed when the processor starts
 
 ## Build
 

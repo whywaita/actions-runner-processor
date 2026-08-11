@@ -16,6 +16,7 @@ type Config struct {
 	Runner       RunnerConfig  `yaml:"runner"`
 	Metrics      MetricsConfig `yaml:"metrics"`
 	WebUI        WebUIConfig   `yaml:"webui"`
+	LogFormat    string        `yaml:"log_format"` // "text" (default) or "json"
 }
 
 // GitHubConfig holds GitHub App authentication parameters and GHES endpoint overrides.
@@ -105,6 +106,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.GitHub.URL == "" {
 		cfg.GitHub.URL = "https://github.com"
+	}
+	if cfg.LogFormat == "" {
+		cfg.LogFormat = "json"
 	}
 
 	return &cfg, nil
