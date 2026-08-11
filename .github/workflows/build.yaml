@@ -49,6 +49,7 @@ jobs:
           sudo bwrap \
             --unshare-all \
             --share-net \
+            --ro-bind / / \
             --overlay-src /usr \
             --tmp-overlay /usr \
             --dev /dev \
