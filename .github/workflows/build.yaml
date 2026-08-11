@@ -32,7 +32,7 @@ jobs:
             -Dselinux=disabled \
             -Dtests=false
           meson compile -C .whywaita/bubblewrap/_build
-          echo "$GITHUB_WORKSPACE/.whywaita/bubblewrap/_build" >> "$GITHUB_PATH"
+          sudo install -m 0755 .whywaita/bubblewrap/_build/bwrap /usr/local/bin/bwrap
       - name: Verify bwrap sandbox
         run: |
           bwrap --version
