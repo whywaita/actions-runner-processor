@@ -1,10 +1,13 @@
 package scaler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/actions/scaleset"
@@ -69,5 +72,23 @@ func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 	}
 	if len(client.removedIDs) != 1 || client.removedIDs[0] != 42 {
 		t.Fatalf("removed runner IDs = %v, want [42]", client.removedIDs)
+	}
+}
+
+func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	s := New(nil, 1, 0, 0, "/srv/actions-runner", t.TempDir(), nil)
+	s.logger = slog.New(slog.NewJSONHandler(&output, nil))
+
+	for _, count := range []int{0, 0, 1, 1, 0, 1} {
+		if _, err := s.HandleDesiredRunnerCount(context.Background(), count); err != nil {
+			t.Fatalf("HandleDesiredRunnerCount(%d) error = %v", count, err)
+		}
+	}
+
+	if got := strings.Count(output.String(), `"msg":"scaling"`); got != 2 {
+		t.Fatalf("scaling log count = %d, want 2; output = %s", got, output.String())
 	}
 }

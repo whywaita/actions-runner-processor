@@ -34,9 +34,10 @@ type BwrapScaler struct {
 	maskedPaths       []string
 	launch            launchRunnerFunc
 
-	mu      sync.Mutex
-	runners map[string]*runner.Runner
-	logger  *slog.Logger
+	mu           sync.Mutex
+	runners      map[string]*runner.Runner
+	assignedJobs int
+	logger       *slog.Logger
 }
 
 // New creates a new BwrapScaler.
@@ -85,11 +86,14 @@ func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (
 	current := len(s.runners)
 	target := min(s.maxRunners, s.minRunners+count)
 
-	s.logger.Info("scaling",
-		slog.Int("current", current),
-		slog.Int("target", target),
-		slog.Int("assignedJobs", count),
-	)
+	if count > s.assignedJobs {
+		s.logger.Info("scaling",
+			slog.Int("current", current),
+			slog.Int("target", target),
+			slog.Int("assignedJobs", count),
+		)
+	}
+	s.assignedJobs = count
 
 	for i := 0; i < target-current; i++ {
 		if err := s.startRunner(ctx); err != nil {
