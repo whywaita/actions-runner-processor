@@ -33,7 +33,6 @@ nfpms:
     priority: optional
     dependencies:
       - bubblewrap
-      - fuse-overlayfs
     contents:
       - src: ./deploy/config.example.yaml
         dst: /etc/actions-runner-processor/config.yaml

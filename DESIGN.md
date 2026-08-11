@@ -72,9 +72,8 @@
        │          → target = min(maxRunners, minRunners + count)
        │          → 不足分の runner を startRunner() で起動
        │
-6. [Scaler]    startRunner() → fuse-overlayfs で /usr の writable layer 作成
-       │          → GenerateJitRunnerConfig(name)
-       │          → bwrap で runner 起動（JIT Config + overlay /usr）
+6. [Scaler]    startRunner() → GenerateJitRunnerConfig(name)
+       │          → bwrap で runner 起動（JIT Config + temporary overlay）
        │
 7. [Runner]    JIT Config で GitHub に自身を登録 → WebSocket でジョブ受信 → 実行
        │
@@ -82,7 +81,7 @@
        │
 9. [Listener]  job_completed メッセージ受信（RunnerName を含む）
        │
-10. [Scaler]   HandleJobCompleted() → RunnerName で runner を特定 → クリーンアップ
+10. [Scaler]   HandleJobCompleted() → RunnerName で runner を特定 → workspace と runner 登録をクリーンアップ
 ```
 
 ### Tech Stack
@@ -94,7 +93,7 @@
 | Listener Loop | `github.com/actions/scaleset/listener` | メッセージループ、ack、再試行を内包 |
 | Auth | GitHub App (installation token) | 既存ポリシー。PAT より安全、スコープ限定可 |
 | Sandbox | bubblewrap (`bwrap`) | rootless、依存極小（1 バイナリ）、namespace 隔離 |
-| Writable /usr | fuse-overlayfs | rootless overlayfs。ジョブごとに CoW layer、`apt install` 可能 |
+| Writable system | bubblewrap `--tmp-overlay` | ジョブごとの一時 CoW layer。外部 mount プロセス不要 |
 | Runner | `actions/runner` (GitHub 公式) | `--once --ephemeral` 不要。JIT Config モードで起動 |
 | Process Manager | systemd | VM 再起動時の自動起動、ログ管理 |
 | Metrics | `prometheus/client_golang` | Prometheus exporter |
@@ -187,58 +186,49 @@ func (r *Runner) Kill() error
 
 **bubblewrap 実行コマンド**:
 
-ジョブごとに fuse-overlayfs で全システムディレクトリ + runner バイナリの writable layer を作成する。
+ジョブごとに bubblewrap の `--tmp-overlay` でシステムディレクトリと runner バイナリの writable layer を作成する。
 
 ```bash
-# ① overlay 作成（runner 起動前、ジョブごと）
 JOB_ID="runner-$(uuidgen | cut -c1-8)"
-OVERLAY_DIR="/opt/runner/overlays/${JOB_ID}"
-RUNNER_OVERLAY_DIR="/opt/runner/overlays/${JOB_ID}-runner"
-mkdir -p "${OVERLAY_DIR}"/{upper,work,merged}
-mkdir -p "${RUNNER_OVERLAY_DIR}"/{upper,work,merged}
+mkdir -p "/opt/runner/workspaces/${JOB_ID}"
 
-# fuse-overlayfs: システムディレクトリ
-fuse-overlayfs \
-  -o lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="${OVERLAY_DIR}/upper",workdir="${OVERLAY_DIR}/work" \
-  "${OVERLAY_DIR}/merged" &
-OVERLAY_PID=$!
-
-# fuse-overlayfs: runner バイナリ（read-only lower, writable upper per job）
-fuse-overlayfs \
-  -o lowerdir=/opt/runner/actions-runner,upperdir="${RUNNER_OVERLAY_DIR}/upper",workdir="${RUNNER_OVERLAY_DIR}/work" \
-  "${RUNNER_OVERLAY_DIR}/merged" &
-RUNNER_OVERLAY_PID=$!
-
-# ② bubblewrap で runner 起動
 bwrap \
-  --bind "${OVERLAY_DIR}/merged/usr" /usr \
-  --bind "${OVERLAY_DIR}/merged/lib" /lib \
-  --bind "${OVERLAY_DIR}/merged/lib64" /lib64 \
-  --bind "${OVERLAY_DIR}/merged/bin" /bin \
-  --bind "${OVERLAY_DIR}/merged/etc" /etc \
-  --bind "${RUNNER_OVERLAY_DIR}/merged" /actions-runner \
+  --overlay-src /usr --tmp-overlay /usr \
+  --overlay-src /lib --tmp-overlay /lib \
+  --overlay-src /lib64 --tmp-overlay /lib64 \
+  --overlay-src /bin --tmp-overlay /bin \
+  --overlay-src /sbin --tmp-overlay /sbin \
+  --overlay-src /etc --tmp-overlay /etc \
+  --overlay-src /var --tmp-overlay /var \
+  --overlay-src /opt/runner/actions-runner --tmp-overlay /actions-runner \
+  --tmpfs /run \
+  --dir /run/systemd \
+  --dir /run/systemd/resolve \
+  --ro-bind /etc/resolv.conf /etc/resolv.conf \
+  --ro-bind /etc/hosts /etc/hosts \
+  --ro-bind /dev/null /etc/actions-runner-processor/config.yaml \
+  --ro-bind /dev/null /etc/actions-runner-processor/github-app.pem \
   --dev /dev \
   --proc /proc \
   --tmpfs /home/runner \
   --tmpfs /tmp \
-  --tmpfs /var \
   --bind /opt/runner/workspaces/${JOB_ID} /actions-runner/_work \
   --unshare-all \
   --share-net \
+  --uid 0 --gid 0 \
   --die-with-parent \
   --new-session \
   /actions-runner/run.sh
 
-# ③ ジョブ完了後に overlay と workspace を削除
-fusermount -u "${OVERLAY_DIR}/merged"
-fusermount -u "${RUNNER_OVERLAY_DIR}/merged"
-kill $OVERLAY_PID $RUNNER_OVERLAY_PID 2>/dev/null
-rm -rf "${OVERLAY_DIR}" "${RUNNER_OVERLAY_DIR}" "/opt/runner/workspaces/${JOB_ID}"
+# ジョブ完了後に workspace を削除
+rm -rf "/opt/runner/workspaces/${JOB_ID}"
 ```
 
-- システムディレクトリと runner バイナリを **両方 overlayfs** 化。ジョブが runner バイナリを改ざんしても他ジョブに影響しない
+- システムディレクトリと runner バイナリを **両方 temporary overlay** 化。変更はプロセス終了時に破棄される
 - クリーンアップは Scaler の `HandleJobCompleted` 内で実行
-- `fuse-overlayfs` プロセスは PID を記録し、ジョブ完了時または listener クラッシュ時に明示的に kill
+- 設定ファイルと GitHub App の秘密鍵は `/dev/null` を bind して sandbox から隠す
+- runner プロセス終了時は JIT 応答の runner ID を使って GitHub 側の登録も削除する
+- processor 起動時は `runner-xxxxxxxx` 形式の stale workspace を削除する
 
 ### 3.4 main entrypoint
 
@@ -271,7 +261,15 @@ func main() {
             session := sClient.CreateMessageSession(ctx, hostname)
             defer session.Close(context.Background())
 
-            scaler := scaler.New(sClient, scaleSet.ID, cfg.MaxRunners, cfg.MinRunners)
+            scaler := scaler.New(
+                sClient,
+                scaleSet.ID,
+                cfg.MaxRunners,
+                cfg.MinRunners,
+                cfg.Runner.ActionsRunnerPath,
+                cfg.Runner.WorkspaceRoot,
+                []string{configPath(), cfg.GitHub.PrivateKeyPath},
+            )
             defer scaler.Shutdown(context.Background())
 
             registry.Register(inst.Scope, scaler)
@@ -413,9 +411,9 @@ func (cfg Config) ResolveMaxRunners() int {
 | Threat | Countermeasure |
 |--------|---------------|
 | ジョブ間の横断アクセス | bubblewrap `--unshare-all` (PID, IPC, UTS, mount namespace 分離) |
-| ジョブがホストファイルを改ざん | `/usr`, `/lib`, `/lib64`, `/bin`, `/etc` は fuse-overlayfs によるジョブごとの CoW layer。変更は upper dir に書かれジョブ終了時に破棄 |
+| ジョブがホストファイルを改ざん | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/var` は bubblewrap temporary overlay。変更はジョブ終了時に破棄 |
 | runner プロセスが残存 | `--die-with-parent` (listener が死んだら全 sandbox も死ぬ) |
-| 認証情報漏洩 | GitHub App private key はファイルシステム権限 600。JIT Config はワンタイム |
+| 認証情報漏洩 | GitHub App private key は権限 600 かつ sandbox 内で mask。JIT Config はワンタイム |
 | ネットワーク経由の攻撃 | `--share-net` のみ（GitHub との通信に必要）。他の network namespace は隔離 |
 | ジョブのリソース食い潰し | `--new-session` + プロセスグループに cgroup 制限を適用可能（将来） |
 
@@ -470,7 +468,7 @@ func (cfg Config) ResolveMaxRunners() int {
 
 ```bash
 # 1. 依存パッケージ
-apt install bubblewrap fuse-overlayfs fuse
+apt install bubblewrap
 
 # 2. actions/runner の展開（起動時に runner-listener が自動で行う）
 #    version: "latest" → GitHub API で最新バージョンを解決 → ダウンロード
@@ -480,7 +478,7 @@ apt install bubblewrap fuse-overlayfs fuse
 
 # 3. 専用ユーザー作成
 useradd -r -s /bin/false runner-listener
-mkdir -p /opt/runner/{actions-runner,workspaces,overlays}
+mkdir -p /opt/runner/{actions-runner,workspaces}
 chown -R runner-listener:runner-listener /opt/runner
 
 # 4. runner-listener の配置

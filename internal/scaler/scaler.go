@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -16,12 +16,23 @@ import (
 	"github.com/whywaita/actions-runner-processor/internal/runner"
 )
 
+type scaleSetClient interface {
+	GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
+	RemoveRunner(context.Context, int64) error
+}
+
+type launchRunnerFunc func(context.Context, *runner.Runner) error
+
 // BwrapScaler manages runner lifecycle: launch, track, cleanup.
 type BwrapScaler struct {
-	client     *scaleset.Client
-	scaleSetID int
-	maxRunners int
-	minRunners int
+	client            scaleSetClient
+	scaleSetID        int
+	maxRunners        int
+	minRunners        int
+	actionsRunnerPath string
+	workspaceRoot     string
+	maskedPaths       []string
+	launch            launchRunnerFunc
 
 	mu      sync.Mutex
 	runners map[string]*runner.Runner
@@ -29,14 +40,18 @@ type BwrapScaler struct {
 }
 
 // New creates a new BwrapScaler.
-func New(client *scaleset.Client, scaleSetID, maxRunners, minRunners int) *BwrapScaler {
+func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, actionsRunnerPath, workspaceRoot string, maskedPaths []string) *BwrapScaler {
 	return &BwrapScaler{
-		client:     client,
-		scaleSetID: scaleSetID,
-		maxRunners: maxRunners,
-		minRunners: minRunners,
-		runners:    make(map[string]*runner.Runner),
-		logger:     slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
+		client:            client,
+		scaleSetID:        scaleSetID,
+		maxRunners:        maxRunners,
+		minRunners:        minRunners,
+		actionsRunnerPath: actionsRunnerPath,
+		workspaceRoot:     workspaceRoot,
+		maskedPaths:       maskedPaths,
+		launch:            runner.Launch,
+		runners:           make(map[string]*runner.Runner),
+		logger:            slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
 	}
 }
 
@@ -54,30 +69,11 @@ func (s *BwrapScaler) HandleJobStarted(_ context.Context, job *scaleset.JobStart
 
 // HandleJobCompleted cleans up after a completed job.
 func (s *BwrapScaler) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.logger.Info("job completed",
 		slog.Int64("runnerRequestID", job.RunnerRequestID),
 		slog.String("runnerName", job.RunnerName),
 		slog.String("result", job.Result),
 	)
-
-	if r, ok := s.runners[job.RunnerName]; ok {
-		_ = r.Kill()
-
-		overlayDir := fmt.Sprintf("/opt/runner/overlays/%s", job.RunnerName)
-		runnerOverlayDir := fmt.Sprintf("/opt/runner/overlays/%s-runner", job.RunnerName)
-		workspaceDir := fmt.Sprintf("/opt/runner/workspaces/%s", job.RunnerName)
-
-		_ = exec.Command("fusermount", "-u", overlayDir+"/merged").Run()
-		_ = exec.Command("fusermount", "-u", runnerOverlayDir+"/merged").Run()
-
-		_ = os.RemoveAll(overlayDir)
-		_ = os.RemoveAll(runnerOverlayDir)
-		_ = os.RemoveAll(workspaceDir)
-	}
-	delete(s.runners, job.RunnerName)
 	return nil
 }
 
@@ -112,9 +108,7 @@ func (s *BwrapScaler) Shutdown(_ context.Context) {
 	s.logger.Info("shutting down", slog.Int("runners", len(s.runners)))
 	for name, r := range s.runners {
 		_ = r.Kill()
-		_ = os.RemoveAll(fmt.Sprintf("/opt/runner/overlays/%s", name))
-		_ = os.RemoveAll(fmt.Sprintf("/opt/runner/overlays/%s-runner", name))
-		_ = os.RemoveAll(fmt.Sprintf("/opt/runner/workspaces/%s", name))
+		_ = os.RemoveAll(filepath.Join(s.workspaceRoot, name))
 	}
 	clear(s.runners)
 }
@@ -138,63 +132,27 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("generate JIT config: %w", err)
 	}
-
-	overlayDir := fmt.Sprintf("/opt/runner/overlays/%s", name)
-	runnerOverlayDir := fmt.Sprintf("/opt/runner/overlays/%s-runner", name)
-	workspaceDir := fmt.Sprintf("/opt/runner/workspaces/%s", name)
-
-	for _, d := range []string{overlayDir, runnerOverlayDir} {
-		for _, sub := range []string{"upper", "work", "merged"} {
-			if err := os.MkdirAll(d+"/"+sub, 0o755); err != nil {
-				return fmt.Errorf("mkdir overlay: %w", err)
-			}
-		}
+	if jit.Runner == nil {
+		return fmt.Errorf("generate JIT config: response did not include runner reference")
 	}
+	runnerID := int64(jit.Runner.ID)
+
+	workspaceDir := filepath.Join(s.workspaceRoot, name)
 	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir workspace: %w", err)
 	}
 
-	// Spawn fuse-overlayfs directly. It daemonizes on its own — no shell wrapper needed.
-	overlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
-		"-o", "lowerdir=/usr:/lib:/lib64:/bin:/etc,upperdir="+overlayDir+"/upper,workdir="+overlayDir+"/work,allow_other",
-		overlayDir+"/merged",
-	)
-	overlayCmd.Stderr = os.Stderr
-	if err := overlayCmd.Start(); err != nil {
-		return fmt.Errorf("start system overlayfs: %w", err)
-	}
-
-	runnerOverlayCmd := exec.CommandContext(ctx, "fuse-overlayfs",
-		"-o", "lowerdir=/opt/runner/actions-runner,upperdir="+runnerOverlayDir+"/upper,workdir="+runnerOverlayDir+"/work,allow_other",
-		runnerOverlayDir+"/merged",
-	)
-	runnerOverlayCmd.Stderr = os.Stderr
-	if err := runnerOverlayCmd.Start(); err != nil {
-		_ = overlayCmd.Process.Kill()
-		return fmt.Errorf("start runner overlayfs: %w", err)
-	}
-
-	// Wait for fuse-overlayfs mounts to become available before launching the runner.
-	if err := waitForPath(overlayDir+"/merged/usr", 10*time.Second); err != nil {
-		_ = overlayCmd.Process.Kill()
-		_ = runnerOverlayCmd.Process.Kill()
-		return fmt.Errorf("wait for system overlay mount: %w", err)
-	}
-	if err := waitForPath(runnerOverlayDir+"/merged/run.sh", 10*time.Second); err != nil {
-		_ = overlayCmd.Process.Kill()
-		_ = runnerOverlayCmd.Process.Kill()
-		return fmt.Errorf("wait for runner overlay mount: %w", err)
-	}
-
 	r := &runner.Runner{
-		Name:      name,
-		JITConfig: jit.EncodedJITConfig,
-		WorkDir:   workspaceDir,
+		Name:              name,
+		JITConfig:         jit.EncodedJITConfig,
+		ActionsRunnerPath: s.actionsRunnerPath,
+		WorkDir:           workspaceDir,
+		MaskedPaths:       s.maskedPaths,
 	}
 
-	if err := runner.Launch(ctx, r); err != nil {
-		_ = overlayCmd.Process.Kill()
-		_ = runnerOverlayCmd.Process.Kill()
+	if err := s.launch(ctx, r); err != nil {
+		_ = os.RemoveAll(workspaceDir)
+		s.removeRunnerRegistration(ctx, runnerID, name)
 		return fmt.Errorf("launch runner: %w", err)
 	}
 
@@ -205,36 +163,45 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	// (crash, OOM, JIT expiry, etc.), remove it from the tracked set so
 	// HandleDesiredRunnerCount can launch a replacement.
 	go func() {
-		if err := r.Wait(); err != nil {
-			stderr := r.StderrOutput()
+		err := r.Wait()
+		output := r.Output()
+		if err != nil {
 			s.logger.Warn("runner exited with error",
 				slog.String("name", name),
 				slog.String("error", err.Error()),
-				slog.String("stderr", stderr),
+				slog.String("output", output),
 			)
 		} else {
-			s.logger.Info("runner exited normally", slog.String("name", name))
+			s.logger.Info("runner exited normally",
+				slog.String("name", name),
+				slog.String("output", output),
+			)
 		}
 
 		s.mu.Lock()
 		delete(s.runners, name)
 		s.mu.Unlock()
 
-		// Clean up overlay processes that may still be mounted.
-		_ = overlayCmd.Process.Kill()
-		_ = runnerOverlayCmd.Process.Kill()
+		_ = os.RemoveAll(workspaceDir)
+		s.removeRunnerRegistration(ctx, runnerID, name)
 	}()
 	return nil
 }
 
-// waitForPath polls until the given path exists or the timeout expires.
-func waitForPath(path string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
+func (s *BwrapScaler) removeRunnerRegistration(ctx context.Context, runnerID int64, name string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	if err := s.client.RemoveRunner(cleanupCtx, runnerID); err != nil {
+		s.logger.Warn("failed to remove runner registration",
+			slog.String("name", name),
+			slog.Int64("runnerID", runnerID),
+			slog.String("error", err.Error()),
+		)
+		return
 	}
-	return fmt.Errorf("timed out waiting for %s after %v", path, timeout)
+	s.logger.Info("runner registration removed",
+		slog.String("name", name),
+		slog.Int64("runnerID", runnerID),
+	)
 }

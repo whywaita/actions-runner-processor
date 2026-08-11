@@ -4,13 +4,15 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +26,8 @@ import (
 	"github.com/whywaita/actions-runner-processor/internal/webui"
 )
 
+var runnerWorkspacePattern = regexp.MustCompile(`^runner-[0-9a-f]{8}$`)
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -35,9 +39,17 @@ func main() {
 	setupLogging(cfg.LogFormat)
 
 	// Verify runtime prerequisites before starting listeners.
-	if perr := preflight(); perr != nil {
+	if perr := preflight(cfg); perr != nil {
 		slog.Error("preflight check failed", "error", perr)
 		os.Exit(1)
+	}
+	removedWorkspaces, err := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
+	if err != nil {
+		slog.Error("failed to clean stale runner workspaces", "error", err)
+		os.Exit(1)
+	}
+	if removedWorkspaces > 0 {
+		slog.Info("cleaned stale runner workspaces", "count", removedWorkspaces)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -148,7 +160,15 @@ func main() {
 			}
 			defer func() { _ = session.Close(context.Background()) }()
 
-			s := scaler.New(sClient, scaleSet.ID, maxRunners, cfg.Runner.MinRunners)
+			s := scaler.New(
+				sClient,
+				scaleSet.ID,
+				maxRunners,
+				cfg.Runner.MinRunners,
+				cfg.Runner.ActionsRunnerPath,
+				cfg.Runner.WorkspaceRoot,
+				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
+			)
 			registry.Register(inst.Scope, s)
 			webRegistry.Register(inst.Scope, s)
 
@@ -193,18 +213,15 @@ func setupLogging(format string) {
 
 // preflight verifies that all runtime prerequisites are met before
 // starting any listeners. Returns an error describing the first failure.
-func preflight() error {
+func preflight(cfg *config.Config) error {
 	checks := []struct {
 		name string
 		fn   func() error
 	}{
 		{"bwrap binary", checkBinary("bwrap")},
-		{"fuse-overlayfs binary", checkBinary("fuse-overlayfs")},
-		{"/dev/fuse", checkDevFuse},
-		{"fuse.conf user_allow_other", checkFuseConf},
-		{"actions-runner directory /opt/runner/actions-runner", checkDir("/opt/runner/actions-runner")},
-		{"workspaces directory /opt/runner/workspaces", checkDir("/opt/runner/workspaces")},
-		{"overlays directory /opt/runner/overlays", checkDir("/opt/runner/overlays")},
+		{"bwrap --tmp-overlay support", checkCommandOption("bwrap", "--tmp-overlay")},
+		{"actions-runner directory", checkDir(cfg.Runner.ActionsRunnerPath)},
+		{"workspaces directory", checkDir(cfg.Runner.WorkspaceRoot)},
 	}
 
 	for _, c := range checks {
@@ -240,29 +257,45 @@ func checkDir(path string) func() error {
 	}
 }
 
-func checkFuseConf() error {
-	f, err := os.Open("/etc/fuse.conf")
-	if err != nil {
-		return fmt.Errorf("cannot open /etc/fuse.conf: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "user_allow_other" {
-			return nil
+func checkCommandOption(name, option string) func() error {
+	return func() error {
+		output, err := exec.Command(name, "--help").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("run %s --help: %w", name, err)
 		}
+		if !hasCommandOption(output, option) {
+			return fmt.Errorf("%s does not support %s", name, option)
+		}
+		return nil
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading /etc/fuse.conf: %w", err)
-	}
-	return fmt.Errorf("user_allow_other is not enabled in /etc/fuse.conf (uncomment the line)")
 }
 
-func checkDevFuse() error {
-	if _, err := os.Stat("/dev/fuse"); err != nil {
-		return fmt.Errorf("/dev/fuse not found — install the 'fuse' package (apt install fuse)")
+func hasCommandOption(help []byte, option string) bool {
+	return slices.Contains(strings.Fields(string(help)), option)
+}
+
+func configPath() string {
+	if path := os.Getenv("CONFIG_PATH"); path != "" {
+		return path
 	}
-	return nil
+	return "/etc/actions-runner-processor/config.yaml"
+}
+
+func cleanupRunnerWorkspaces(root string) (int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, fmt.Errorf("read workspace root: %w", err)
+	}
+
+	removed := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !runnerWorkspacePattern.MatchString(entry.Name()) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return removed, fmt.Errorf("remove workspace %s: %w", entry.Name(), err)
+		}
+		removed++
+	}
+	return removed, nil
 }
