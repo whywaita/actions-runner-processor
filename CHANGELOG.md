@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.4](https://github.com/whywaita/actions-runner-processor/compare/v0.0.3...v0.0.4) - 2026-08-11
+
+- fix: monitor runner process lifecycle and add JSON log support by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/9
+
 ## [v0.0.3](https://github.com/whywaita/actions-runner-processor/compare/v0.0.2...v0.0.3) - 2026-08-10
 
 - fix: remove duplicate Account.Login from repo scope URL by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/7
