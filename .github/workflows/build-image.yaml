@@ -67,7 +67,8 @@ jobs:
 
       - name: Smoke-test that the runner binary is present
         run: |
-          tar tzf /tmp/runner-image/actions-runner-image-$(awk '$1=="arch:"{print $2}' image/image.yaml).tar.gz \
+          IMG="/tmp/runner-image/actions-runner-image-$(awk '/^arch:/{gsub(/"/,"",$2); print $2}' image/image.yaml).tar.gz"
+          tar tzf "$IMG" \
             | grep -q 'opt/actions-runner/run.sh' \
             && echo "runner run.sh present" \
             || { echo "run.sh missing in image"; exit 1; }
