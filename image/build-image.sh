@@ -72,7 +72,13 @@ if [[ "$RUNNER_VERSION" == "latest" ]]; then
   RUNNER_VERSION="$(curl -sL https://api.github.com/repos/actions/runner/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+')"
 fi
 TRIM="${RUNNER_VERSION#v}"
-RUNNER_FILE="actions-runner-linux-${ARCH}-${TRIM}.tar.gz"
+# GitHub names runner linux binaries with x64/arm64 (not amd64).
+case "$ARCH" in
+  amd64) RUNNER_ARCH="x64" ;;
+  arm64) RUNNER_ARCH="arm64" ;;
+  *)     RUNNER_ARCH="$ARCH" ;;
+esac
+RUNNER_FILE="actions-runner-linux-${RUNNER_ARCH}-${TRIM}.tar.gz"
 mkdir -p "$ROOTFS/opt/actions-runner"
 curl -sL "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/${RUNNER_FILE}" \
   | tar xz -C "$ROOTFS/opt/actions-runner"

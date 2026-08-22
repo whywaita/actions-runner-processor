@@ -85,8 +85,14 @@ else
   VER="$(curl -sL https://api.github.com/repos/actions/runner/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+')"
 fi
 TRIM="${VER#v}"
+# GitHub names runner linux binaries with x64/arm64 (not amd64).
+case "$ARCH" in
+  amd64) RUNNER_ARCH="x64" ;;
+  arm64) RUNNER_ARCH="arm64" ;;
+  *)     RUNNER_ARCH="$ARCH" ;;
+esac
 mkdir -p /opt/actions-runner
-curl -sL "https://github.com/actions/runner/releases/download/${VER}/actions-runner-linux-${ARCH}-${TRIM}.tar.gz" \
+curl -sL "https://github.com/actions/runner/releases/download/${VER}/actions-runner-linux-${RUNNER_ARCH}-${TRIM}.tar.gz" \
   | tar xz -C /opt/actions-runner
 chmod +x /opt/actions-runner/run.sh
 
