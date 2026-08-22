@@ -1,5 +1,6 @@
 // Package scaler implements the listener.Scaler interface for launching
-// ephemeral runners in bubblewrap sandboxes.
+// ephemeral runners in isolated sandboxes (systemd-nspawn by default,
+// bubblewrap as a deprecated fallback).
 package scaler
 
 import (
@@ -32,7 +33,14 @@ type BwrapScaler struct {
 	actionsRunnerPath string
 	workspaceRoot     string
 	maskedPaths       []string
-	launch            launchRunnerFunc
+
+	// mode/imagePath/entrypoint drive the sandbox backend (nspawn default,
+	// bwrap deprecated).
+	mode       string
+	imagePath  string
+	entrypoint string
+
+	launch launchRunnerFunc
 
 	mu           sync.Mutex
 	runners      map[string]*runner.Runner
@@ -41,7 +49,7 @@ type BwrapScaler struct {
 }
 
 // New creates a new BwrapScaler.
-func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, actionsRunnerPath, workspaceRoot string, maskedPaths []string) *BwrapScaler {
+func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, actionsRunnerPath, workspaceRoot string, maskedPaths []string, mode, imagePath, entrypoint string) *BwrapScaler {
 	return &BwrapScaler{
 		client:            client,
 		scaleSetID:        scaleSetID,
@@ -50,6 +58,9 @@ func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, actionsR
 		actionsRunnerPath: actionsRunnerPath,
 		workspaceRoot:     workspaceRoot,
 		maskedPaths:       maskedPaths,
+		mode:              mode,
+		imagePath:         imagePath,
+		entrypoint:        entrypoint,
 		launch:            runner.Launch,
 		runners:           make(map[string]*runner.Runner),
 		logger:            slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
@@ -112,7 +123,11 @@ func (s *BwrapScaler) Shutdown(_ context.Context) {
 	s.logger.Info("shutting down", slog.Int("runners", len(s.runners)))
 	for name, r := range s.runners {
 		_ = r.Kill()
-		_ = os.RemoveAll(filepath.Join(s.workspaceRoot, name))
+		// In bwrap mode the workspace is a host dir we created; in nspawn mode
+		// the ephemeral overlay is cleaned up by systemd-nspawn on exit.
+		if s.mode == "bwrap" {
+			_ = os.RemoveAll(filepath.Join(s.workspaceRoot, name))
+		}
 	}
 	clear(s.runners)
 }
@@ -141,9 +156,15 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	}
 	runnerID := int64(jit.Runner.ID)
 
-	workspaceDir := filepath.Join(s.workspaceRoot, name)
-	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir workspace: %w", err)
+	// nspawn mode boots the runner from the custom image; the runner's
+	// workspace lives inside the ephemeral overlay, so no host scratch dir.
+	// bwrap mode needs a host workspace dir bound into the sandbox.
+	var workspaceDir string
+	if s.mode == "bwrap" {
+		workspaceDir = filepath.Join(s.workspaceRoot, name)
+		if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir workspace: %w", err)
+		}
 	}
 
 	r := &runner.Runner{
@@ -152,16 +173,21 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		ActionsRunnerPath: s.actionsRunnerPath,
 		WorkDir:           workspaceDir,
 		MaskedPaths:       s.maskedPaths,
+		Mode:              s.mode,
+		ImagePath:         s.imagePath,
+		Entrypoint:        s.entrypoint,
 	}
 
 	if err := s.launch(ctx, r); err != nil {
-		_ = os.RemoveAll(workspaceDir)
+		if s.mode == "bwrap" {
+			_ = os.RemoveAll(workspaceDir)
+		}
 		s.removeRunnerRegistration(ctx, runnerID, name)
 		return fmt.Errorf("launch runner: %w", err)
 	}
 
 	s.runners[name] = r
-	s.logger.Info("runner started", slog.String("name", name))
+	s.logger.Info("runner started", slog.String("name", name), slog.String("mode", s.mode))
 
 	// Monitor the runner process. If it exits without completing a job
 	// (crash, OOM, JIT expiry, etc.), remove it from the tracked set so
@@ -186,7 +212,9 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		delete(s.runners, name)
 		s.mu.Unlock()
 
-		_ = os.RemoveAll(workspaceDir)
+		if s.mode == "bwrap" {
+			_ = os.RemoveAll(workspaceDir)
+		}
 		s.removeRunnerRegistration(ctx, runnerID, name)
 	}()
 	return nil

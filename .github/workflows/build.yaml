@@ -16,47 +16,34 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26"
-      - name: Checkout bubblewrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: containers/bubblewrap
-          ref: 1b80120ef26a28e065e67f89bfef873f13bdd317 # v0.11.2
-          path: .whywaita/bubblewrap
-          persist-credentials: false
-      - name: Build bubblewrap
+      - name: Install systemd-container and debootstrap
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libcap-dev meson
-          meson setup .whywaita/bubblewrap/_build .whywaita/bubblewrap \
-            -Dman=disabled \
-            -Dselinux=disabled \
-            -Dtests=false
-          meson compile -C .whywaita/bubblewrap/_build
-          sudo install -m 0755 .whywaita/bubblewrap/_build/bwrap /usr/local/bin/bwrap
-      - name: Verify bwrap sandbox
+          sudo apt-get install -y -qq systemd-container debootstrap
+      - name: Verify systemd-nspawn boots a runner image with ephemeral overlay
         run: |
-          bwrap --version
-          # Check if unprivileged user namespaces work
-          if bwrap --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
-            echo "bwrap sandbox OK (unprivileged)"
-          else
-            echo "unprivileged bwrap requires sudo on GitHub Actions, testing with sudo..."
-            sudo bwrap --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true
-            echo "bwrap sandbox OK (sudo)"
+          systemd-nspawn --version | head -1
+          # Boot a minimal debootstrap rootfs (without the heavy runner rb) with
+          # an ephemeral overlay, run a command inside, and confirm the write is
+          # isolated to the overlay (not persisted to the lower image dir).
+          set -e
+          sudo rm -rf /tmp/nspawn-rootfs /tmp/nspawn-upper
+          sudo mkdir -p /tmp/nspawn-rootfs
+          sudo debootstrap --variant=minbase --arch=amd64 noble /tmp/nspawn-rootfs http://archive.ubuntu.com/ubuntu/ \
+            >/dev/null 2>&1
+          sudo systemd-nspawn \
+            --directory=/tmp/nspawn-rootfs \
+            --volatile=overlay \
+            --as-pid2 \
+            --machine=ci-nspawn \
+            -- /bin/sh -c 'echo qemu-x86_64-static > /tmp/overlay-write-test && test -f /tmp/overlay-write-test && echo "ephemeral overlay write OK"'
+          # The write must NOT be visible on the host lower dir.
+          if [ -f /tmp/nspawn-rootfs/tmp/overlay-write-test ]; then
+            echo "FAIL: overlay write leaked to host lower dir"
+            exit 1
           fi
-      - name: Verify temporary overlay
-        run: |
-          sudo bwrap \
-            --unshare-all \
-            --share-net \
-            --ro-bind / / \
-            --overlay-src /usr \
-            --tmp-overlay /usr \
-            --dev /dev \
-            --proc /proc \
-            --uid 0 \
-            --gid 0 \
-            /usr/bin/sh -c 'touch /usr/.overlay-test && test -f /usr/.overlay-test'
+          echo "ephemeral overlay isolation OK"
+          sudo rm -rf /tmp/nspawn-rootfs /tmp/nspawn-upper
       - name: Build
         run: go build ./...
       - name: Test

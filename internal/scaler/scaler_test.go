@@ -41,7 +41,7 @@ func TestHandleJobCompletedWaitsForRunnerToExit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := New(nil, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil)
+	s := New(nil, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil, "bwrap", "", "")
 	s.runners[runnerName] = &runner.Runner{Name: runnerName}
 
 	err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: runnerName})
@@ -61,7 +61,7 @@ func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 
 	client := &fakeScaleSetClient{jitRunnerID: 42}
 	workspaceRoot := t.TempDir()
-	s := New(client, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil)
+	s := New(client, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil, "bwrap", "", "")
 	s.launch = func(context.Context, *runner.Runner) error {
 		return errors.New("launch failed")
 	}
@@ -79,7 +79,7 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 	t.Parallel()
 
 	var output bytes.Buffer
-	s := New(nil, 1, 0, 0, "/srv/actions-runner", t.TempDir(), nil)
+	s := New(nil, 1, 0, 0, "/srv/actions-runner", t.TempDir(), nil, "bwrap", "", "")
 	s.logger = slog.New(slog.NewJSONHandler(&output, nil))
 
 	for _, count := range []int{0, 0, 1, 1, 0, 1} {
