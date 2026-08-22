@@ -1,6 +1,7 @@
 // actions-runner-processor is a lightweight GitHub Actions self-hosted runner processor.
 // It discovers GitHub App installations, creates runner scale sets, and
-// launches ephemeral runners in bubblewrap sandboxes.
+// launches ephemeral runners in systemd-nspawn containers (bubblewrap as a
+// deprecated fallback).
 package main
 
 import (
@@ -43,13 +44,17 @@ func main() {
 		slog.Error("preflight check failed", "error", perr)
 		os.Exit(1)
 	}
-	removedWorkspaces, err := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
-	if err != nil {
-		slog.Error("failed to clean stale runner workspaces", "error", err)
-		os.Exit(1)
-	}
-	if removedWorkspaces > 0 {
-		slog.Info("cleaned stale runner workspaces", "count", removedWorkspaces)
+	// In bwrap mode, clean up stale runner workspaces from crashed runs.
+	// nspawn keeps no host workspaces (the ephemeral overlay is auto-cleaned).
+	if cfg.Runner.Mode == "bwrap" {
+		removedWorkspaces, cleanupErr := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
+		if cleanupErr != nil {
+			slog.Error("failed to clean stale runner workspaces", "error", cleanupErr)
+			os.Exit(1)
+		}
+		if removedWorkspaces > 0 {
+			slog.Info("cleaned stale runner workspaces", "count", removedWorkspaces)
+		}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -168,6 +173,9 @@ func main() {
 				cfg.Runner.ActionsRunnerPath,
 				cfg.Runner.WorkspaceRoot,
 				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
+				cfg.Runner.Mode,
+				cfg.Runner.ImagePath,
+				cfg.Runner.Entrypoint,
 			)
 			registry.Register(inst.Scope, s)
 			webRegistry.Register(inst.Scope, s)
@@ -214,23 +222,40 @@ func setupLogging(format string) {
 // preflight verifies that all runtime prerequisites are met before
 // starting any listeners. Returns an error describing the first failure.
 func preflight(cfg *config.Config) error {
+	if cfg.Runner.Mode == "bwrap" {
+		checks := []struct {
+			name string
+			fn   func() error
+		}{
+			{"bwrap binary", checkBinary("bwrap")},
+			{"bwrap --tmp-overlay support", checkCommandOption("bwrap", "--tmp-overlay")},
+			{"actions-runner directory", checkDir(cfg.Runner.ActionsRunnerPath)},
+			{"workspaces directory", checkDir(cfg.Runner.WorkspaceRoot)},
+		}
+		for _, c := range checks {
+			if err := c.fn(); err != nil {
+				return fmt.Errorf("%s: %w", c.name, err)
+			}
+			slog.Info("preflight check passed", "check", c.name)
+		}
+		return nil
+	}
+
+	// nspawn mode (default)
 	checks := []struct {
 		name string
 		fn   func() error
 	}{
-		{"bwrap binary", checkBinary("bwrap")},
-		{"bwrap --tmp-overlay support", checkCommandOption("bwrap", "--tmp-overlay")},
-		{"actions-runner directory", checkDir(cfg.Runner.ActionsRunnerPath)},
-		{"workspaces directory", checkDir(cfg.Runner.WorkspaceRoot)},
+		{"systemd-nspawn binary", checkBinary("systemd-nspawn")},
+		{"image directory " + cfg.Runner.ImagePath, checkDir(cfg.Runner.ImagePath)},
 	}
-
 	for _, c := range checks {
 		if err := c.fn(); err != nil {
 			return fmt.Errorf("%s: %w", c.name, err)
 		}
 		slog.Info("preflight check passed", "check", c.name)
 	}
-
+	slog.Info("running with sandbox mode", "mode", cfg.Runner.Mode)
 	return nil
 }
 
