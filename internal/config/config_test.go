@@ -71,6 +71,15 @@ github:
 	if cfg.Runner.ActionsRunnerPath != "/opt/runner/actions-runner" {
 		t.Errorf("ActionsRunnerPath: wrong default")
 	}
+	if cfg.Runner.Mode != "nspawn" {
+		t.Errorf("Mode: want nspawn, got %s", cfg.Runner.Mode)
+	}
+	if cfg.Runner.ImagePath != "/opt/runner/image" {
+		t.Errorf("ImagePath: want /opt/runner/image, got %s", cfg.Runner.ImagePath)
+	}
+	if cfg.Runner.Entrypoint != "/opt/actions-runner/run.sh" {
+		t.Errorf("Entrypoint: want /opt/actions-runner/run.sh, got %s", cfg.Runner.Entrypoint)
+	}
 	if cfg.GitHub.APIURL != "https://api.github.com" {
 		t.Errorf("APIURL: want https://api.github.com, got %s", cfg.GitHub.APIURL)
 	}

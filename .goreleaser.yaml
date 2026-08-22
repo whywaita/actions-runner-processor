@@ -23,16 +23,16 @@ nfpms:
     homepage: "https://github.com/whywaita/actions-runner-processor"
     maintainer: "whywaita <whywaita@example.com>"
     description: |
-      GitHub Actions セルフホストランナーを Kubernetes なしで運用するための軽量 Go バイナリ。
-      単一の Linux VM 上で動作し、Message Session API を使ってジョブを検知し、
-      bubblewrap で隔離された ephemeral runner を動的に起動・破棄します。
+      A lightweight Go binary to run GitHub Actions self-hosted runners without Kubernetes.
+      Runs on a single Linux VM, detects jobs via the Message Session API, and dynamically
+      starts/destroys ephemeral runners isolated by systemd-nspawn.
     license: MIT
     formats:
       - deb
     section: admin
     priority: optional
     dependencies:
-      - bubblewrap
+      - systemd-container
     contents:
       - src: ./deploy/config.example.yaml
         dst: /etc/actions-runner-processor/config.yaml
