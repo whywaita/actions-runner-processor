@@ -94,7 +94,7 @@ It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://
 | Listener Loop | `github.com/actions/scaleset/listener` | Message loop, ack, and retry built in |
 | Auth | GitHub App (installation token) | Existing policy. Safer than PAT, scope-limited |
 | Sandbox | systemd-nspawn | Isolated container from a custom rootfs image. Ephemeral CoW root |
-| Custom Image | directory rootfs (`/opt/runner/image`) | Runner image built with distrobuilder / debootstrap. Writable during job (sudo) |
+| Custom Image | directory rootfs (`/opt/runner/image`) | Built declaratively by `image/build-image.sh` (debootstrap + chroot), baked in CI. Writable during job (sudo) |
 | Ephemeral Root | `--volatile=overlay` | Image as read-only lower; writes land on an overlay discarded on exit |
 | Runner | `actions/runner` (official) | No `--once --ephemeral` needed. Boot from JIT Config mode |
 | Process Manager | systemd | Auto-start on reboot, log management |
@@ -220,6 +220,37 @@ systemd-nspawn \
 ### 3.3.1 Legacy bubblewrap backend (backward compatible)
 
 Setting `runner.mode: "bwrap"` boots with the legacy bubblewrap (`--tmp-overlay`). System directories and the runner binary are temporary overlays and changes are discarded when the process exits. `/dev/null` masking and runner registration removal are shared with nspawn. In bwrap mode the processor removes `runner-xxxxxxxx` stale workspaces on startup.
+
+### 3.3.2 Custom runner image generation
+
+`image/` ships a declarative builder for the nspawn rootfs.
+
+```
+image/
+├── image.yaml           # manifest: base distro, arch, runner version, apt packages
+├── build-image.sh       # debootstrap + chroot provisioning + tar.gz
+└── (built by) .github/workflows/build-image.yaml
+```
+
+- `image/image.yaml` declares the base distribution/release, architecture, the
+  `actions/runner` version (`latest` resolves at build time), and extra apt
+  packages baked into the rootfs.
+- `image/build-image.sh` debootstraps the base, applies the packages and
+  installs `actions/runner` at `/opt/actions-runner` inside a chroot, then
+  packs the rootfs into `actions-runner-image-<arch>.tar.gz`.
+- `.github/workflows/build-image.yaml` runs it in CI (`workflow_dispatch`, or
+  push/PR touching `image/**`) and uploads the tarball as an artifact.
+
+The tarball is expanded to `runner.image_path` (default `/opt/runner/image`):
+
+```bash
+sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner/image
+```
+
+nspawn boots a rootfs **directory** (`--directory=`), so the image is a rootfs
+tarball, not an LXD squashfs. For a full GitHub-hosted-compatible toolset,
+build the actions-runner-images recipe with distrobuilder and use its rootfs
+output instead.
 
 ### 3.4 main entrypoint
 
@@ -558,6 +589,9 @@ actions-runner-processor/
 │   └── webui/
 │       ├── server.go             # HTTP handler
 │       └── templates/            # embed FS: dashboard HTML
+├── image/
+│   ├── image.yaml                # custom image manifest (base distro, arch, packages)
+│   └── build-image.sh            # debootstrap + chroot rootfs builder
 ├── go.mod
 ├── go.sum
 ├── .goreleaser.yaml              # GoReleaser config

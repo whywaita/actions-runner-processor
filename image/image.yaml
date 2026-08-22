@@ -1,0 +1,41 @@
+# Custom runner image manifest for actions-runner-processor (nspawn mode).
+#
+# This manifest drives image/build-image.sh. It builds a lightweight root
+# filesystem (rootfs) that systemd-nspawn boots (runner.image_path). The base
+# is debootstrapped and then provisioned inside a chroot: the actions/runner
+# binary plus any extra apt packages you declare are baked in.
+#
+# The resulting rootfs tarball is meant to be expanded to runner.image_path
+# (default /opt/runner/image) on the host, then booted read-only with an
+# ephemeral overlay. Jobs run as root inside the container, so `sudo` works.
+
+# Base distribution for debootstrap. Must be a Debian/Ubuntu release
+# (e.g. "ubuntu:noble" for Ubuntu 24.04 or "debian:trixie").
+distribution: "ubuntu"
+
+# Release codename used by debootstrap ("noble" = Ubuntu 24.04, "jammy" = 22.04).
+release: "noble"
+
+# Architecture for the rootfs ("amd64" or "arm64").
+arch: "amd64"
+
+# Version of actions/runner to install at /opt/actions-runner.
+# "latest" resolves the newest release at build time.
+runner_version: "latest"
+
+# Absolute path inside the container of the runner boot command.
+entrypoint: "/opt/actions-runner/run.sh"
+
+# Extra apt packages to install inside the rootfs (in addition to the runner
+# runtime dependencies sqlite3, curl, git, jq). Add your build tools here
+# rather than installing them per job.
+packages:
+  - build-essential
+  - curl
+  - git
+  - jq
+  - openssh-client
+  - python3
+  - sqlite3
+  - unzip
+  - wget

@@ -1,0 +1,53 @@
+# Build the actions-runner-processor custom runner image (nspawn rootfs).
+#
+# Produces a rootfs .tar.gz artifact that you expand to runner.image_path
+# (default /opt/runner/image) on the runner host.
+#
+# Triggered on workflow_dispatch and on push/PR touching image/* or the
+# manifest. The ubuntu-latest runner is root, so debootstrap + chroot work
+# directly.
+name: build-image
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'image/**'
+      - '.github/workflows/build-image.yaml'
+  pull_request:
+    paths:
+      - 'image/**'
+      - '.github/workflows/build-image.yaml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install debootstrap and shellcheck
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq debootstrap shellcheck
+
+      - name: Lint image shell scripts
+        run: shellcheck image/build-image.sh
+
+      - name: Build rootfs
+        run: |
+          # GitHub runner runs as root; OUTPUT_DIR under /tmp is fine.
+          sudo bash image/build-image.sh /tmp/runner-image
+
+      - name: Smoke-test that the runner binary is present
+        run: |
+          tar tzf /tmp/runner-image/actions-runner-image-$(awk '$1=="arch:"{print $2}' image/image.yaml).tar.gz \
+            | grep -q 'opt/actions-runner/run.sh' \
+            && echo "runner run.sh present" \
+            || { echo "run.sh missing in image"; exit 1; }
+
+      - name: Upload rootfs image
+        uses: actions/upload-artifact@v4
+        with:
+          name: actions-runner-image
+          path: /tmp/runner-image/actions-runner-image-*.tar.gz
+          if-no-files-found: error

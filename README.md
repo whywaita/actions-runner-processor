@@ -54,17 +54,41 @@ apt install systemd-container
 ### Building a custom runner image
 
 `runner.image_path` must point to a root filesystem tree that contains the
-`actions/runner` binary. A quick way to build one:
+`actions/runner` binary. This repo ships a declarative image build under
+`image/`:
+
+- `image/image.yaml` — the manifest: base distro, architecture, `actions/runner`
+  version, and the extra apt packages baked in.
+- `image/build-image.sh` — debootsraps the base, provisions the packages and
+  runner in a chroot, and packs the resulting rootfs into a `.tar.gz`.
+
+**Build it locally** (needs root for debootstrap/chroot):
+
+```bash
+sudo OUTPUT_DIR=/tmp/img bash image/build-image.sh
+# → /tmp/img/actions-runner-image-amd64.tar.gz
+```
+
+**Or let CI bake it** — `.github/workflows/build-image.yaml` runs
+`image/build-image.sh` (on `workflow_dispatch`, or on push/PR touching
+`image/**`) and uploads the rootfs tarball as an artifact.
+
+**Expand to the host** (`runner.image_path`, default `/opt/runner/image`):
+
+```bash
+sudo rm -rf /opt/runner/image && sudo mkdir -p /opt/runner/image
+sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner/image
+```
+
+A quick manual way to prepare a base rootfs (equivalent to what the script does):
 
 ```bash
 # 1. debootstrap a base rootfs
 sudo debootstrap --variant=minbase noble /opt/runner/work-rootfs
-
 # 2. download and extract actions/runner
 sudo mkdir -p /opt/runner/work-rootfs/opt/actions-runner
 curl -L "https://github.com/actions/runner/releases/download/v2.326.0/actions-runner-linux-x64-2.326.0.tar.gz" \
   | sudo tar xz -C /opt/runner/work-rootfs/opt/actions-runner
-
 # 3. atomically place it (so nspawn never sees a partial tree)
 sudo rm -rf /opt/runner/image
 sudo mv /opt/runner/work-rootfs /opt/runner/image
@@ -72,7 +96,8 @@ sudo mv /opt/runner/work-rootfs /opt/runner/image
 
 For a full GitHub-hosted-compatible toolset, build with `distrobuilder` from
 the actions-runner-images recipe and copy the resulting rootfs to
-`/opt/runner/image`.
+`/opt/runner/image`. Note nspawn boots a rootfs **directory** (`--directory=`),
+so use a rootfs output rather than an LXD squashfs.
 
 ### Configuration
 
