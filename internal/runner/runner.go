@@ -55,8 +55,6 @@ func launchNspawn(ctx context.Context, r *Runner) error {
 		"--setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=" + r.JITConfig,
 		"--setenv=RUNNER_ALLOW_RUNASROOT=1",
 		"--machine=" + r.Name,
-		"--uid", "0",
-		"--gid", "0",
 		"--bind-ro=/etc/resolv.conf",
 		"--bind-ro=/etc/hosts",
 	}

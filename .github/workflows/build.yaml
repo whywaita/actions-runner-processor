@@ -36,7 +36,6 @@ jobs:
             --volatile=overlay \
             --as-pid2 \
             --machine=ci-nspawn \
-            --uid 0 --gid 0 \
             -- /bin/sh -c 'echo qemu-x86_64-static > /tmp/overlay-write-test && test -f /tmp/overlay-write-test && echo "ephemeral overlay write OK"'
           # The write must NOT be visible on the host lower dir.
           if [ -f /tmp/nspawn-rootfs/tmp/overlay-write-test ]; then

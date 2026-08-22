@@ -47,9 +47,9 @@ func main() {
 	// In bwrap mode, clean up stale runner workspaces from crashed runs.
 	// nspawn keeps no host workspaces (the ephemeral overlay is auto-cleaned).
 	if cfg.Runner.Mode == "bwrap" {
-		removedWorkspaces, err := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
-		if err != nil {
-			slog.Error("failed to clean stale runner workspaces", "error", err)
+		removedWorkspaces, cleanupErr := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
+		if cleanupErr != nil {
+			slog.Error("failed to clean stale runner workspaces", "error", cleanupErr)
 			os.Exit(1)
 		}
 		if removedWorkspaces > 0 {
