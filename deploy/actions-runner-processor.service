@@ -4,8 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=actions-runner-processor
-Group=actions-runner-processor
+# systemd-nspawn needs privileges to set up namespace/overlay mounts, so the
+# processor runs as root (the runner inside the container also runs as root,
+# which is what makes `sudo` available in job steps).
 ExecStart=/usr/bin/actions-runner-processor
 Restart=always
 RestartSec=10

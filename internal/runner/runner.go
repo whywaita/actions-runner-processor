@@ -1,5 +1,6 @@
 // Package runner handles launching ephemeral GitHub Actions runners
-// inside bubblewrap sandboxes.
+// inside an isolated sandbox (systemd-nspawn by default, bubblewrap as a
+// deprecated fallback).
 package runner
 
 import (
@@ -19,12 +20,77 @@ type Runner struct {
 	WorkDir           string
 	MaskedPaths       []string
 
+	// Mode is the sandbox backend: "nspawn" (default) or "bwrap".
+	Mode       string
+	ImagePath  string // nspawn: root filesystem directory (custom image)
+	Entrypoint string // nspawn: absolute path (in-container) of the boot command
+
 	cmd    *exec.Cmd
 	output *bytes.Buffer
 }
 
-// Launch starts a runner inside a bubblewrap sandbox.
+// Launch starts a runner in an isolated sandbox.
 func Launch(ctx context.Context, r *Runner) error {
+	if r.Mode == "bwrap" {
+		return launchBwrap(ctx, r)
+	}
+	return launchNspawn(ctx, r)
+}
+
+// launchNspawn boots the runner in a systemd-nspawn container.
+//
+// The container boots from the custom image directory (ImagePath) with an
+// ephemeral overlayed root (--volatile=overlay): the image is mounted
+// read-only and all writes land on a private overlay layer that is discarded
+// when the container exits. Networking is shared with the host (no
+// --private-network) so the runner can reach GitHub over outbound HTTPS.
+// The runner runs as root inside the container, which is what makes `sudo`
+// available in job steps.
+func launchNspawn(ctx context.Context, r *Runner) error {
+	args := []string{
+		"--quiet",
+		"--directory=" + r.ImagePath,
+		"--volatile=overlay",
+		"--as-pid2",
+		"--setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=" + r.JITConfig,
+		"--setenv=RUNNER_ALLOW_RUNASROOT=1",
+		"--machine=" + r.Name,
+		"--uid", "0",
+		"--gid", "0",
+		"--bind-ro=/etc/resolv.conf",
+		"--bind-ro=/etc/hosts",
+	}
+	for _, path := range r.MaskedPaths {
+		if !isWithin(path, "/etc") {
+			continue
+		}
+		args = append(args, "--bind-ro=/dev/null", path)
+	}
+	args = append(args, r.Entrypoint)
+
+	cmd := exec.CommandContext(ctx, "systemd-nspawn", args...)
+	// Keep JIT config in the child environment too so any wrapper process the
+	// entrypoint spawns inherits it.
+	cmd.Env = append(cmd.Environ(),
+		"ACTIONS_RUNNER_INPUT_JITCONFIG="+r.JITConfig,
+		"HOME=/root",
+		"RUNNER_ALLOW_RUNASROOT=1",
+	)
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	r.output = &output
+	r.cmd = cmd
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("systemd-nspawn start: %w", err)
+	}
+	return nil
+}
+
+// launchBwrap starts the runner in a bubblewrap sandbox (deprecated).
+func launchBwrap(ctx context.Context, r *Runner) error {
 	cmd := exec.CommandContext(ctx, "bwrap", buildArgs(r)...)
 	cmd.Env = append(cmd.Environ(),
 		"ACTIONS_RUNNER_INPUT_JITCONFIG="+r.JITConfig,
@@ -36,13 +102,11 @@ func Launch(ctx context.Context, r *Runner) error {
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	r.output = &output
-
 	r.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("bwrap start: %w", err)
 	}
-
 	return nil
 }
 

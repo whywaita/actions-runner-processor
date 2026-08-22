@@ -5,8 +5,7 @@ for homelab Linux VMs.
 
 It uses the [actions/scaleset](https://github.com/actions/scaleset) Message
 Session API (the same protocol as ARC) to detect queued jobs and launch
-ephemeral runners inside [bubblewrap](https://github.com/containers/bubblewrap)
-sandboxes with per-runner temporary overlays.
+ephemeral runners inside [systemd-nspawn](https://systemd.io/) containers.
 
 ## Overview
 
@@ -25,7 +24,7 @@ sandboxes with per-runner temporary overlays.
  │  ├── Prometheus /metrics (:9090)                  │
  │  ├── Web UI dashboard (:8080)                     │
  │  │                                                │
- │  └── bubblewrap sandboxes (ephemeral, 1 job each) │
+ │  └── systemd-nspawn containers (ephemeral, 1 job) │
  └──────────────────────────────────────────────────┘
 ```
 
@@ -37,21 +36,43 @@ sandboxes with per-runner temporary overlays.
 | **No Inbound** | All communication is outbound HTTPS. Works behind NAT/firewall. |
 | **Ephemeral Runners** | Each runner lives for exactly one job, then self-destructs. |
 | **JIT Config** | No registration token needed. Runners boot directly from a JIT config. |
-| **Sandboxed** | bubblewrap namespace isolation (`--unshare-all`). Zero cross-job interference. |
+| **Custom Image** | Boot runners from your own root filesystem image (runner + tools). |
+| **sudo works** | The runner runs as root inside the container, so `sudo` is available. |
 
 ## Quick Start
 
 ### Prerequisites
 
 ```bash
-# Dependencies
-apt install bubblewrap
+apt install systemd-container
 
-# Download and extract GitHub Actions runner binary
-mkdir -p /opt/runner/actions-runner
-curl -L "https://github.com/actions/runner/releases/download/v2.326.0/actions-runner-linux-x64-2.326.0.tar.gz" \
-  | tar xz -C /opt/runner/actions-runner
+# Build a custom runner image (root filesystem) and place it at /opt/runner/image.
+# The image must contain actions/runner preinstalled at /opt/actions-runner
+# (the default entrypoint is /opt/actions-runner/run.sh).
 ```
+
+### Building a custom runner image
+
+`runner.image_path` must point to a root filesystem tree that contains the
+`actions/runner` binary. A quick way to build one:
+
+```bash
+# 1. debootstrap a base rootfs
+sudo debootstrap --variant=minbase noble /opt/runner/work-rootfs
+
+# 2. download and extract actions/runner
+sudo mkdir -p /opt/runner/work-rootfs/opt/actions-runner
+curl -L "https://github.com/actions/runner/releases/download/v2.326.0/actions-runner-linux-x64-2.326.0.tar.gz" \
+  | sudo tar xz -C /opt/runner/work-rootfs/opt/actions-runner
+
+# 3. atomically place it (so nspawn never sees a partial tree)
+sudo rm -rf /opt/runner/image
+sudo mv /opt/runner/work-rootfs /opt/runner/image
+```
+
+For a full GitHub-hosted-compatible toolset, build with `distrobuilder` from
+the actions-runner-images recipe and copy the resulting rootfs to
+`/opt/runner/image`.
 
 ### Configuration
 
@@ -65,9 +86,9 @@ github:
 scale_set_name: "actions-runner-processor"
 
 runner:
-  version: "latest"
-  actions_runner_path: "/opt/runner/actions-runner"
-  workspace_root: "/opt/runner/workspaces"
+  mode: "nspawn"                                   # sandbox backend: "nspawn" (default) or "bwrap"
+  image_path: "/opt/runner/image"                  # custom runner image rootfs
+  entrypoint: "/opt/actions-runner/run.sh"         # in-container boot command
   max_runners: 4                                   # 0 = runtime.NumCPU()
   min_runners: 0                                   # warm idle runners
 
@@ -105,17 +126,12 @@ when unset.
 ### Install
 
 ```bash
-# Create dedicated user
-useradd -r -s /bin/false actions-runner-processor
-mkdir -p /opt/actions-runner-processor /opt/runner/{actions-runner,workspaces}
-chown -R actions-runner-processor:actions-runner-processor /opt/runner
-
 # Install binary
 cp actions-runner-processor /opt/actions-runner-processor/
 cp config.yaml /etc/actions-runner-processor/
 cp github-app.pem /etc/actions-runner-processor/ && chmod 600 /etc/actions-runner-processor/github-app.pem
 
-# Install systemd unit
+# Install systemd unit (runs as root so systemd-nspawn can create containers)
 cp deploy/actions-runner-processor.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now actions-runner-processor
@@ -149,24 +165,34 @@ For detailed architecture documentation, see [DESIGN.md](DESIGN.md).
 3. Listener → AcquireJobs()
 4. Listener → job_started received
 5. Scaler → HandleDesiredRunnerCount() → startRunner()
-6. Scaler → GenerateJitRunnerConfig()
-7. Runner → bwrap temporary overlays start → JIT config registers with GitHub → runs job
-8. Runner → job completes → auto-deregister → sandbox destroyed
+6. Scaler → GenerateJitRunnerConfig() + systemd-nspawn container from image
+7. Runner → JIT config boot in container → registers with GitHub → runs job
+8. Runner → job completes → auto-deregister → container (ephemeral overlay) destroyed
 9. Listener → job_completed received
-10. Scaler → HandleJobCompleted() → cleanup workspace and runner registration
+10. Scaler → HandleJobCompleted() → cleanup runner registration
 ```
 
 ### Sandboxing
 
-Each runner is launched inside a bubblewrap sandbox:
+Each runner is booted in a `systemd-nspawn` container:
 
-- `--unshare-all` — isolated user, PID, IPC, UTS, and mount namespaces
-- `--tmp-overlay` — per-job writable CoW layers for system directories and the runner distribution
-- `--die-with-parent` — sandbox auto-dies if the processor exits
-- `--share-net` only — runner needs outbound HTTPS to GitHub
-- The configuration file and GitHub App private key are masked with `/dev/null` inside the sandbox
-- Runner registrations are removed by ID whenever a runner process exits, including startup failures
-- Stale `runner-xxxxxxxx` workspace directories are removed when the processor starts
+```bash
+systemd-nspawn \
+  --directory=/opt/runner/image \      # custom image (read-only lower)
+  --volatile=overlay \                 # ephemeral overlay root (changes discarded on exit)
+  --as-pid2 \                          # run entrypoint as PID 2
+  --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=<jit> \
+  --machine=runner-<name> \
+  --bind-ro=/etc/resolv.conf \
+  /opt/actions-runner/run.sh
+```
+
+- **Custom image** — the image directory is the base (lower) layer.
+- **Ephemeral** — all writes go to a private overlay layer discarded on exit, so jobs can `apt install` and mutate `/usr` without affecting other jobs or the host.
+- **Network** — shares the host network namespace (no `--private-network`), so the runner reaches GitHub over outbound HTTPS only.
+- **sudo** — runs as root inside the container; `sudo` works as expected in job steps.
+- The configuration file and GitHub App private key are masked with `/dev/null` inside the sandbox.
+- Runner registrations are removed by ID whenever a runner process exits, including startup failures.
 
 ## Build
 

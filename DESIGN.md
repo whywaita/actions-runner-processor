@@ -6,7 +6,7 @@
 
 **actions-runner-processor** は、GitHub Actions のセルフホストランナーを Kubernetes なしで運用するための軽量 Go バイナリです。
 
-単一の Linux VM 上で動作し、[actions/scaleset](https://github.com/actions/scaleset)（GitHub 公式 SDK）の Message Session API を使ってジョブを検知し、[bubblewrap](https://github.com/containers/bubblewrap) で隔離された ephemeral runner を動的に起動・破棄します。
+単一の Linux VM 上で動作し、[actions/scaleset](https://github.com/actions/scaleset)（GitHub 公式 SDK）の Message Session API を使ってジョブを検知し、[systemd-nspawn](https://systemd.io/) で隔離された ephemeral runner を動的に起動・破棄します。runner はカスタムイメージ（root ファイルシステム）から起動され、ジョブ中は書き込み可能（`sudo` 可）、終了時に破棄されます（旧 bubblewrap 方式は `runner.mode: "bwrap"` で後方互換として残置）。
 
 ### Design Principles
 
@@ -16,7 +16,8 @@
 | **No Inbound** | 通信はすべて outbound。NAT/FW 内側から 443 だけ開いていれば動く |
 | **Ephemeral** | runner は 1 ジョブ実行後、自動的に登録解除 + sandbox ごと消滅 |
 | **JIT Runner** | Registration Token 不要。JIT Config で runner を直接起動 |
-| **Sandboxed** | bubblewrap による namespace 隔離。ジョブ間の干渉なし |
+| **Sandboxed** | systemd-nspawn コンテナによる隔離。ジョブ間の干渉なし |
+| **Custom Image** | カスタム rootfs イメージから runner を起動。job 内で `sudo` 使用可 |
 | **ARC-Compatible** | Message Session は ARC と同一プロトコル。GitHub 公式 SDK を利用 |
 
 ## 2. Architecture
@@ -50,8 +51,8 @@
 │  └──────────────────────────┬─────────────────────────┘  │
 │                              │                             │
 │              ┌───────────────┴───────────────┐            │
-│              │ bubblewrap sandboxes (×N×M)   │            │
-│              │  namespace 隔離、1job→消滅     │            │
+│              │ systemd-nspawn containers (×N×M) │            │
+│              │  ephemeral overlay, 1job→消滅     │            │
 │              └───────────────────────────────┘            │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -73,7 +74,7 @@
        │          → 不足分の runner を startRunner() で起動
        │
 6. [Scaler]    startRunner() → GenerateJitRunnerConfig(name)
-       │          → bwrap で runner 起動（JIT Config + temporary overlay）
+       │          → systemd-nspawn で runner 起動（JIT Config + ephemeral overlay）
        │
 7. [Runner]    JIT Config で GitHub に自身を登録 → WebSocket でジョブ受信 → 実行
        │
@@ -92,8 +93,9 @@
 | Message Session | `github.com/actions/scaleset` | GitHub 公式 SDK。ARC と同一プロトコル |
 | Listener Loop | `github.com/actions/scaleset/listener` | メッセージループ、ack、再試行を内包 |
 | Auth | GitHub App (installation token) | 既存ポリシー。PAT より安全、スコープ限定可 |
-| Sandbox | bubblewrap (`bwrap`) | rootless、依存極小（1 バイナリ）、namespace 隔離 |
-| Writable system | bubblewrap `--tmp-overlay` | ジョブごとの一時 CoW layer。外部 mount プロセス不要 |
+| Sandbox | systemd-nspawn | カスタム rootfs イメージから隔離コンテナ起動。ephemeral CoW root |
+| Custom Image | ディレクトリ rootfs (`/opt/runner/image`) | distrobuilder / debootstrap で作る runner イメージ。ジョブ中は書き込み可（sudo） |
+| Ephemeral Root | `--volatile=overlay` | イメージを read-only lower に、書き込みは終了時に破棄される overlay |
 | Runner | `actions/runner` (GitHub 公式) | `--once --ephemeral` 不要。JIT Config モードで起動 |
 | Process Manager | systemd | VM 再起動時の自動起動、ログ管理 |
 | Metrics | `prometheus/client_golang` | Prometheus exporter |
@@ -170,13 +172,16 @@ Runner の追跡には `RunnerName`（JIT Config 発行時に指定した名前�
 
 ### 3.3 Runner Launcher
 
-`internal/runner/` — bubblewrap 経由での runner 起動。
+`internal/runner/` — systemd-nspawn 経由での runner 起動（旧 bubblewrap は `mode: "bwrap"` で残置）。
 
 ```go
 type Runner struct {
     Name       string
     JITConfig  string
     WorkDir    string
+    Mode       string
+    ImagePath  string
+    Entrypoint string
 }
 
 func Launch(ctx context.Context, r Runner) error
@@ -184,51 +189,39 @@ func (r *Runner) Wait() error
 func (r *Runner) Kill() error
 ```
 
-**bubblewrap 実行コマンド**:
+**systemd-nspawn 実行コマンド**:
 
-ジョブごとに bubblewrap の `--tmp-overlay` でシステムディレクトリと runner バイナリの writable layer を作成する。
+`ImagePath`（カスタム rootfs ディレクトリ）を read-only lower として起動し、`--volatile=overlay` で挿し込まれる private overlay にジョブ中の全書き込みを寄せる。コンテナ終了時にこの overlay は自動破棄されるため、ジョブは `sudo apt install` 等で `/usr` を自由に書き換えても他ジョブ・ホストに影響しない。
 
 ```bash
-JOB_ID="runner-$(uuidgen | cut -c1-8)"
-mkdir -p "/opt/runner/workspaces/${JOB_ID}"
-
-bwrap \
-  --overlay-src /usr --tmp-overlay /usr \
-  --overlay-src /lib --tmp-overlay /lib \
-  --overlay-src /lib64 --tmp-overlay /lib64 \
-  --overlay-src /bin --tmp-overlay /bin \
-  --overlay-src /sbin --tmp-overlay /sbin \
-  --overlay-src /etc --tmp-overlay /etc \
-  --overlay-src /var --tmp-overlay /var \
-  --overlay-src /opt/runner/actions-runner --tmp-overlay /actions-runner \
-  --tmpfs /run \
-  --dir /run/systemd \
-  --dir /run/systemd/resolve \
-  --ro-bind /etc/resolv.conf /etc/resolv.conf \
-  --ro-bind /etc/hosts /etc/hosts \
-  --ro-bind /dev/null /etc/actions-runner-processor/config.yaml \
-  --ro-bind /dev/null /etc/actions-runner-processor/github-app.pem \
-  --dev /dev \
-  --proc /proc \
-  --tmpfs /home/runner \
-  --tmpfs /tmp \
-  --bind /opt/runner/workspaces/${JOB_ID} /actions-runner/_work \
-  --unshare-all \
-  --share-net \
+# ジョブごとに runner を nspawn コンテナで起動
+R_NAME="runner-$(uuidgen | cut -c1-8)"
+systemd-nspawn \
+  --directory=/opt/runner/image \                    # カスタムイメージ（read-only lower）
+  --volatile=overlay \                                # ephemeral overlay root（破棄される）
+  --as-pid2 \                                         # entrypoint を PID 2 として実行
+  --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=... \
+  --setenv=RUNNER_ALLOW_RUNASROOT=1 \
+  --machine="${R_NAME}" \
   --uid 0 --gid 0 \
-  --die-with-parent \
-  --new-session \
-  /actions-runner/run.sh
+  --bind-ro=/etc/resolv.conf \
+  --bind-ro=/etc/hosts \
+  --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
+  --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem \
+  /opt/actions-runner/run.sh
 
-# ジョブ完了後に workspace を削除
-rm -rf "/opt/runner/workspaces/${JOB_ID}"
+# ジョブ完了時に Kill() するだけで、overlay とコンテナは nspawn が自動クリーンアップ
 ```
 
-- システムディレクトリと runner バイナリを **両方 temporary overlay** 化。変更はプロセス終了時に破棄される
-- クリーンアップは Scaler の `HandleJobCompleted` 内で実行
+- カスタムイメージはホストの `/opt/runner/image`（`runner.image_path`）。`distrobuilder` / `debootstrap` + runner で構築
+- ネットワークはホスト共有（`--private-network` 不使用）→ outbound HTTPS のみで GitHub と疎通
+- runner はコンテナ内で **root** として起動 → ジョブステップで `sudo` が使える
 - 設定ファイルと GitHub App の秘密鍵は `/dev/null` を bind して sandbox から隠す
 - runner プロセス終了時は JIT 応答の runner ID を使って GitHub 側の登録も削除する
-- processor 起動時は `runner-xxxxxxxx` 形式の stale workspace を削除する
+
+### 3.3.1 旧 bubblewrap 方式（後方互換）
+
+`runner.mode: "bwrap"` を指定すると従来の bubblewrap（`--tmp-overlay`）で起動する。システムディレクトリと runner バイナリを一時 overlay 化し、プロセス終了時に変更を破棄する。`/dev/null` マスク、runner 登録削除は nspawn と共通。bwrap では processor 起動時に `runner-xxxxxxxx` 形式の stale workspace を削除する。
 
 ### 3.4 main entrypoint
 
@@ -410,11 +403,11 @@ func (cfg Config) ResolveMaxRunners() int {
 
 | Threat | Countermeasure |
 |--------|---------------|
-| ジョブ間の横断アクセス | bubblewrap `--unshare-all` (PID, IPC, UTS, mount namespace 分離) |
-| ジョブがホストファイルを改ざん | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/var` は bubblewrap temporary overlay。変更はジョブ終了時に破棄 |
-| runner プロセスが残存 | `--die-with-parent` (listener が死んだら全 sandbox も死ぬ) |
+| ジョブ間の横断アクセス | systemd-nspawn コンテナ（PID, IPC, UTS, mount namespace 分離）。runner はコンテナ内で root だが、ホストとは別 namespace |
+| ジョブがホストファイルを改ざん | カスタムイメージは read-only lower、書き込みは `--volatile=overlay` の ephemeral 上層。ジョブ終了時に破棄 |
+| runner プロセスが残存 | systemd-nspawn コンテナは `Kill()` で終了。ephemeral overlay も同時に破棄 |
 | 認証情報漏洩 | GitHub App private key は権限 600 かつ sandbox 内で mask。JIT Config はワンタイム |
-| ネットワーク経由の攻撃 | `--share-net` のみ（GitHub との通信に必要）。他の network namespace は隔離 |
+| ネットワーク経由の攻撃 | ホストネットワーク共有（ただし outbound のみ）。必要な範囲の接続のみ |
 | ジョブのリソース食い潰し | `--new-session` + プロセスグループに cgroup 制限を適用可能（将来） |
 
 ### JIT Config Security
@@ -468,44 +461,45 @@ func (cfg Config) ResolveMaxRunners() int {
 
 ```bash
 # 1. 依存パッケージ
-apt install bubblewrap
+apt install systemd-container
 
-# 2. actions/runner の展開（起動時に runner-listener が自動で行う）
-#    version: "latest" → GitHub API で最新バージョンを解決 → ダウンロード
-#    手動で事前展開する場合は:
-#   RUNNER_VERSION="v2.326.0"
-#   curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION#v}.tar.gz" | tar xz -C /opt/runner/actions-runner
+# 2. カスタム runner イメージの構築（/opt/runner/image に配置）
+#    - distrobuilder で actions-runner-images 相当の rootfs を作る、または
+#    - debootstrap で最小 rootfs を作り actions/runner を展開する
+RUNNER_VERSION="v2.326.0"
+sudo debootstrap --variant=minbase noble /opt/runner/work-rootfs
+sudo mkdir -p /opt/runner/work-rootfs/opt/actions-runner
+curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION#v}.tar.gz" \
+  | sudo tar xz -C /opt/runner/work-rootfs/opt/actions-runner
+sudo rm -rf /opt/runner/image
+sudo mv /opt/runner/work-rootfs /opt/runner/image
 
-# 3. 専用ユーザー作成
-useradd -r -s /bin/false runner-listener
-mkdir -p /opt/runner/{actions-runner,workspaces}
-chown -R runner-listener:runner-listener /opt/runner
+# 3. systemd-nspawn は root で実行する必要がある → 専用ユーザーは不要
 
-# 4. runner-listener の配置
-cp runner-listener /opt/runner-listener/
-cp config.yaml /etc/runner-listener/
-cp github-app.pem /etc/runner-listener/ && chmod 600 /etc/runner-listener/github-app.pem
+# 4. runner-processor の配置
+cp actions-runner-processor /opt/actions-runner-processor/
+cp config.yaml /etc/actions-runner-processor/
+cp github-app.pem /etc/actions-runner-processor/ && chmod 600 /etc/actions-runner-processor/github-app.pem
 
-# 5. systemd unit
-cat > /etc/systemd/system/runner-listener.service << 'EOF'
+# 5. systemd unit（root で実行）
+cat > /etc/systemd/system/actions-runner-processor.service << 'EOF'
 [Unit]
-Description=GitHub Actions Runner Listener
+Description=GitHub Actions Runner Processor
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=runner-listener
-ExecStart=/opt/runner-listener/runner-listener
+ExecStart=/usr/bin/actions-runner-processor
 Restart=always
 RestartSec=10
-Environment=CONFIG_PATH=/etc/runner-listener/config.yaml
+Environment=CONFIG_PATH=/etc/actions-runner-processor/config.yaml
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now runner-listener
+systemctl enable --now actions-runner-processor
 ```
 
 ### Workflow Targeting
@@ -554,7 +548,7 @@ actions-runner-processor/
 │   ├── metrics/
 │   │   └── metrics.go            # Prometheus exporter
 │   ├── runner/
-│   │   └── runner.go             # bwrap runner 起動
+│   │   └── runner.go             # nspawn (デフォルト) / bwrap runner 起動
 │   ├── scaler/
 │   │   └── scaler.go             # listener.Scaler 実装
 │   └── webui/
@@ -575,7 +569,7 @@ actions-runner-processor/
 |-------|-------|--------|
 | **Phase 1: Core** | `go mod init`, 設定読み込み, Installation scope 自動検出, scaleset.Client 初期化, Scale Set 作成 | 小 |
 | **Phase 2: Listener** | Message Session 確立, listener.Run(), 空の Scaler | 小 |
-| **Phase 3: Runner** | JIT Config 生成, bwrap runner 起動, プロセス管理 | 中 |
+| **Phase 3: Runner** | JIT Config 生成, systemd-nspawn runner 起動, プロセス管理 | 中 |
 | **Phase 4: Scaler** | HandleDesiredRunnerCount (スケールアップ/ダウン), HandleJobCompleted (クリーンアップ) | 中 |
 | **Phase 5: Metrics** | Prometheus exporter, runner/job メトリクス公開 | 小 |
 | **Phase 6: Web UI** | embed 簡易ダッシュボード, `/api/status`, `/api/jobs` JSON API | 中 |

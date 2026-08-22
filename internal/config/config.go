@@ -40,6 +40,19 @@ type RunnerConfig struct {
 	WorkspaceRoot     string `yaml:"workspace_root"`
 	MaxRunners        int    `yaml:"max_runners"`
 	MinRunners        int    `yaml:"min_runners"`
+
+	// Sandbox backend for ephemeral runners. "nspawn" (default) boots each
+	// runner in a systemd-nspawn container from ImagePath with an ephemeral
+	// overlayed root (changes discarded on exit). "bwrap" uses bubblewrap on
+	// the host (deprecated).
+	Mode string `yaml:"mode"`
+	// ImagePath is the root filesystem directory used as the custom runner
+	// image for nspawn mode (e.g. a distrobuilder / debootstrap rootfs with
+	// actions/runner preinstalled).
+	ImagePath string `yaml:"image_path"`
+	// Entrypoint is the absolute path (inside the container) of the command
+	// that launches the runner. Defaults to /opt/actions-runner/run.sh.
+	Entrypoint string `yaml:"entrypoint"`
 }
 
 // MetricsConfig holds Prometheus exporter settings.
@@ -100,6 +113,16 @@ func Load() (*Config, error) {
 	}
 	if cfg.Runner.WorkspaceRoot == "" {
 		cfg.Runner.WorkspaceRoot = "/opt/runner/workspaces"
+	}
+	// Sandbox backend. Default to nspawn.
+	if cfg.Runner.Mode == "" {
+		cfg.Runner.Mode = "nspawn"
+	}
+	if cfg.Runner.ImagePath == "" {
+		cfg.Runner.ImagePath = "/opt/runner/image"
+	}
+	if cfg.Runner.Entrypoint == "" {
+		cfg.Runner.Entrypoint = "/opt/actions-runner/run.sh"
 	}
 	if cfg.GitHub.APIURL == "" {
 		cfg.GitHub.APIURL = "https://api.github.com"
