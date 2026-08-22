@@ -1,15 +1,36 @@
 # Build the actions-runner-processor custom runner image (nspawn rootfs).
 #
-# Produces a rootfs .tar.gz artifact that you expand to runner.image_path
-# (default /opt/runner/image) on the runner host.
+# Two image types are produced, both as a rootfs .tar.gz that you expand to
+# runner.image_path (default /opt/runner/image):
 #
-# Triggered on workflow_dispatch and on push/PR touching image/* or the
-# manifest. The ubuntu-latest runner is root, so debootstrap + chroot work
-# directly.
+#   build        — lightweight rootfs (debootstrap + a few apt packages),
+#                  fast, runs on pull_request / push / workflow_dispatch.
+#   build-full   — full GitHub-hosted-compatible toolset (Packer + LXD,
+#                  mirroring actions-runner-images-lxd). Heavy (~1h, 50GB+),
+#                  so it runs only on workflow_dispatch via the "Type" input.
+#
+# The ubuntu-latest runner is root, so debootstrap/chroot work directly.
 name: build-image
 
 on:
   workflow_dispatch:
+    inputs:
+      type:
+        description: 'Image type to build'
+        required: true
+        default: 'lightweight'
+        type: choice
+        options:
+          - lightweight
+          - full
+      release:
+        description: 'Ubuntu release for the full image (22.04 or 24.04)'
+        required: false
+        default: '24.04'
+        type: choice
+        options:
+          - '22.04'
+          - '24.04'
   push:
     paths:
       - 'image/**'
@@ -19,8 +40,14 @@ on:
       - 'image/**'
       - '.github/workflows/build-image.yaml'
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    # Runs for PRs/pushes/lightweight dispatch. Full builds are handled by the
+    # build-full job below, so the lightweight job only runs once.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.type == 'full') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -50,4 +77,43 @@ jobs:
         with:
           name: actions-runner-image
           path: /tmp/runner-image/actions-runner-image-*.tar.gz
+          if-no-files-found: error
+
+  build-full:
+    # Only triggered explicitly via workflow_dispatch (full). Heavy build.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.type == 'full' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packer and shellcheck
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq shellcheck wget
+          wget -q -O- "https://apt.releases.hashicorp.com/gpg" \
+            | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/hashicorp.list >/dev/null
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq packer
+
+      - name: Setup LXD
+        uses: canonical/setup-lxd@v0.1.2
+        with:
+          channel: 5.21/stable
+
+      - name: Lint full-image shell scripts
+        run: shellcheck image/build-image-full.sh
+
+      - name: Build full rootfs
+        run: |
+          # Override the release manifest value via the dispatch input.
+          sudo sed -i "s/^release:.*/release: \"${{ inputs.release }}\"/" image/image-full.yaml
+          sudo bash image/build-image-full.sh /tmp/runner-image-full
+
+      - name: Upload full rootfs image
+        uses: actions/upload-artifact@v4
+        with:
+          name: actions-runner-image-full
+          path: /tmp/runner-image-full/actions-runner-image-full-*.tar.gz
           if-no-files-found: error

@@ -1,0 +1,26 @@
+# Full GitHub-hosted-compatible runner image manifest (nspawn mode).
+#
+# Drives image/build-image-full.sh. Unlike the lightweight image.yaml builder
+# (debootstrap + a few apt packages), this produces a full
+# GitHub-hosted-compatible toolset by building actions/runner-images with
+# Packer (the same approach as actions-runner-images-lxd), then exporting the
+# built rootfs directory as a tarball for systemd-nspawn.
+#
+# This is a heavy build: it downloads many toolchains (50GB+ of images/apt) and
+# takes on the order of an hour. The captured rootfs is meant to be expanded to
+# runner.image_path (default /opt/runner/image).
+
+# Target Ubuntu release of the actions/runner-images image to build.
+# Supported: "22.04" (jammy) or "24.04" (noble).
+release: "24.04"
+
+# Architecture (only "amd64" is currently supported by actions/runner-images).
+arch: "amd64"
+
+# Tag of actions/runner-images to build from. "latest" clones default branch.
+runner_images_ref: "latest"
+
+# actions-runner-images-lxd repo that provides lxd.patch (adapted packer build).
+lxd_patch_repo: "https://github.com/whywaita/actions-runner-images-lxd"
+lxd_patch_ref: "master"
+lxd_patch_file: "lxd.patch"
