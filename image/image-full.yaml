@@ -20,6 +20,10 @@ arch: "amd64"
 # Tag of actions/runner-images to build from. "latest" clones default branch.
 runner_images_ref: "latest"
 
+# Version of actions/runner to install at /opt/actions-runner. "latest"
+# resolves the newest release at build time.
+runner_version: "latest"
+
 # actions-runner-images-lxd repo that provides lxd.patch (adapted packer build).
 lxd_patch_repo: "https://github.com/whywaita/actions-runner-images-lxd"
 lxd_patch_ref: "master"

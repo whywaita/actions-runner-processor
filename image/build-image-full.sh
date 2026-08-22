@@ -1,16 +1,16 @@
 #!/bin/bash
 # Build a full GitHub-hosted-compatible runner rootfs for systemd-nspawn.
 #
-# This mirrors actions-runner-images-lxd: clone actions/runner-images, apply
-# the LXD-adapted packer patch (lxd.patch), build the image as an LXD
-# container with Packer, then export the container's rootfs directory as a
-# .tar.gz for systemd-nspawn (--directory=).
+# actions/runner-images is built by running images/ubuntu/scripts/build/*.sh
+# in order (its packer templates are just a loop over these scripts). So we
+# boot a debootstrap base in a systemd-nspawn container, run the same build
+# scripts directly inside it, and export the resulting rootfs .tar.gz for
+# systemd-nspawn (--directory=). No LXD, no packer, no setup-lxd needed.
 #
 # Heavy build: many toolchains, ~50GB+, roughly an hour per image. Trigger via
 # CI (workflow_dispatch) rather than on every commit.
 #
-# Requires: root, LXD (snap), packer. On CI this runs on ubuntu-latest with
-# setup-lxd. Locally: install lxd + packer and run as root.
+# Requires: root, systemd-container, debootstrap, curl, git.
 #
 # Usage:
 #   bash image/build-image-full.sh [output-dir]
@@ -26,67 +26,177 @@ get() {
   awk -v key="$1" '$1 == key ":" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$MANIFEST"
 }
 
-RELEASE="$(get release)"
-ARCH="$(get arch)"
+RELEASE="$(get release)"          # 22.04 / 24.04
+ARCH="$(get arch)"                # amd64
 RUNNER_IMAGES_REF="$(get runner_images_ref)"
-LXD_PATCH_REPO="$(get lxd_patch_repo)"
-LXD_PATCH_REF="$(get lxd_patch_ref)"
-LXD_PATCH_FILE="$(get lxd_patch_file)"
+RUNNER_VERSION="$(get runner_version)"
 
 if [[ -z "$RELEASE" || "$ARCH" != "amd64" ]]; then
   echo "error: manifest must set release and arch=amd64" >&2
   exit 1
 fi
-if [[ "$(id -u)" == "0" ]]; then
-  :
-else
-  # Non-root is fine as long as the caller has lxc access (socket group).
-  # The build itself is done by the packer lxd builder.
-  :
-fi
-
-NORM="${RELEASE//./_}"
-WORK="$OUTPUT_DIR/work"
-rm -rf "$WORK"; mkdir -p "$WORK" "$OUTPUT_DIR"
-
-echo ">>> clone actions/runner-images"
-git clone --quiet --depth 1 "https://github.com/actions/runner-images" "$WORK/runner-images"
-cd "$WORK/runner-images"
-if [[ "$RUNNER_IMAGES_REF" != "latest" ]]; then
-  git fetch --quiet --depth 1 "origin" "tag/${RUNNER_IMAGES_REF}" 2>/dev/null \
-    || git checkout --quiet "$RUNNER_IMAGES_REF"
-fi
-
-echo ">>> fetch and apply lxd.patch"
-curl -sL "${LXD_PATCH_REPO}/raw/${LXD_PATCH_REF}/${LXD_PATCH_FILE}" -o lxd.patch
-patch -p1 < lxd.patch >/dev/null
-
-echo ">>> packer init + build (ubuntu ${RELEASE})"
-cd ./images/ubuntu/templates
-packer init .
-packer validate -syntax-only -only "ubuntu-${RELEASE}.lxd.build_image_${NORM}" .
-packer build -only "ubuntu-${RELEASE}.lxd.build_image_${NORM}" .
-
-echo ">>> locate the packer-lxd container rootfs"
-# The snap LXD container for the default project lives under this path
-# (same path actions-runner-images-lxd passes to distrobuilder).
-ROOTFS_CANDIDATES=(
-  "/var/snap/lxd/common/lxd/storage-pools/default/containers/packer-lxd"
-  "/var/lib/lxd/storage-pools/default/containers/packer-lxd"
-)
-FOUND=""
-for cand in "${ROOTFS_CANDIDATES[@]}"; do
-  if [ -d "$cand" ]; then FOUND="$cand"; break; fi
-done
-if [[ -z "$FOUND" ]]; then
-  echo "error: could not locate packer-lxd container rootfs" >&2
-  echo "  looked in: ${ROOTFS_CANDIDATES[*]}" >&2
+if [[ "$(id -u)" != "0" ]]; then
+  echo "error: must run as root (debootstrap + systemd-nspawn)" >&2
   exit 1
 fi
-echo ">>> rootfs dir: $FOUND"
+
+command -v systemd-nspawn >/dev/null 2>&1 || { echo "error: systemd-nspawn (systemd-container) not installed"; exit 1; }
+command -v debootstrap >/dev/null 2>&1 || { echo "error: debootstrap not installed"; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "error: curl not installed"; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "error: git not installed"; exit 1; }
+
+WORK="$OUTPUT_DIR/work"
+MACHINE="runner-build-$(date +%s)"
+rm -rf "$WORK"; mkdir -p "$WORK" "$OUTPUT_DIR"
+
+# Map release codename for debootstrap.
+CODENAME="noble"
+[[ "$RELEASE" == "22.04" ]] && CODENAME="jammy"
+
+echo ">>> clone actions/runner-images"
+if [[ -d "$WORK/runner-images" ]]; then
+  rm -rf "$WORK/runner-images"
+fi
+git clone --quiet --depth 1 "https://github.com/actions/runner-images" "$WORK/runner-images"
+if [[ "$RUNNER_IMAGES_REF" != "latest" ]]; then
+  git -C "$WORK/runner-images" fetch --quiet --depth 1 origin "tag/${RUNNER_IMAGES_REF}" 2>/dev/null \
+    || git -C "$WORK/runner-images" checkout --quiet "$RUNNER_IMAGES_REF"
+fi
+
+echo ">>> debootstrap base ($RELEASE, $CODENAME, $ARCH)"
+debootstrap --variant=minbase --arch="$ARCH" "$CODENAME" "$WORK/rootfs" "http://archive.ubuntu.com/ubuntu/"
+
+cp /etc/resolv.conf "$WORK/rootfs/etc/resolv.conf" 2>/dev/null || true
+
+echo ">>> boot base in systemd-nspawn and provision"
+cat > "$WORK/provision.sh" <<'PROVISION'
+#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+# Basic tooling the runner-images scripts assume.
+apt-get update -y -qq
+apt-get install -y -qq sudo git curl jq ca-certificates locales
+
+# Install the GitHub Actions runner (used as the boot entrypoint).
+if [ -n "${RUNNER_VERSION:-}" ] && [ "${RUNNER_VERSION}" != "latest" ]; then
+  VER="${RUNNER_VERSION}"
+else
+  VER="$(curl -sL https://api.github.com/repos/actions/runner/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+')"
+fi
+TRIM="${VER#v}"
+mkdir -p /opt/actions-runner
+curl -sL "https://github.com/actions/runner/releases/download/${VER}/actions-runner-linux-${ARCH}-${TRIM}.tar.gz" \
+  | tar xz -C /opt/actions-runner
+chmod +x /opt/actions-runner/run.sh
+
+# Fresh OS inside the container; run every runner-images build script in a
+# stable, conventional order. Some scripts depend on helper scripts copied to
+# $INSTALLER_SCRIPT_FOLDER; copy the whole build dir there like packer does.
+export INSTALLER_SCRIPT_FOLDER=/opt/runner-images-scripts
+mkdir -p "$INSTALLER_SCRIPT_FOLDER"
+cp -R /runner-images/images/ubuntu/scripts/build/* "$INSTALLER_SCRIPT_FOLDER/"
+export HELPER_SCRIPTS=/opt/runner-images-scripts
+export IMAGE_OS=ubuntu
+export IMAGE_VERSION="${RELEASE}"
+
+cd /runner-images/images/ubuntu/scripts/build
+for script in \
+  configure-apt-mock.sh \
+  install-ms-repos.sh \
+  configure-apt-sources.sh \
+  configure-apt.sh \
+  configure-limits.sh \
+  configure-image-data.sh \
+  configure-environment.sh \
+  configure-system.sh \
+  configure-snap.sh \
+  configure-pipx.sh \
+  install-apt-vital.sh \
+  install-powershell.sh \
+  install-actions-cache.sh \
+  install-apt-common.sh \
+  install-azcopy.sh \
+  install-azure-cli.sh \
+  install-azure-devops-cli.sh \
+  install-bicep.sh \
+  install-apache.sh \
+  install-aws-tools.sh \
+  install-clang.sh \
+  install-swift.sh \
+  install-cmake.sh \
+  install-codeql-bundle.sh \
+  install-awf.sh \
+  install-container-tools.sh \
+  install-dotnetcore-sdk.sh \
+  install-microsoft-edge.sh \
+  install-gcc-compilers.sh \
+  install-firefox.sh \
+  install-gfortran.sh \
+  install-git.sh \
+  install-git-lfs.sh \
+  install-github-cli.sh \
+  install-google-chrome.sh \
+  install-google-cloud-cli.sh \
+  install-haskell.sh \
+  install-java-tools.sh \
+  install-kubernetes-tools.sh \
+  install-miniconda.sh \
+  install-kotlin.sh \
+  install-mysql.sh \
+  install-nginx.sh \
+  install-nvm.sh \
+  install-nodejs.sh \
+  install-bazel.sh \
+  install-php.sh \
+  install-postgresql.sh \
+  install-pulumi.sh \
+  install-ruby.sh \
+  install-rust.sh \
+  install-julia.sh \
+  install-selenium.sh \
+  install-packer.sh \
+  install-vcpkg.sh \
+  configure-dpkg.sh \
+  install-yq.sh \
+  install-android-sdk.sh \
+  install-pypy.sh \
+  install-python.sh \
+  install-zstd.sh \
+  install-ninja.sh \
+  install-docker.sh \
+  ; do
+    if [ -f "$script" ]; then
+      echo "### running $script"
+      bash "$script" || { echo "FAILED: $script" >&2; exit 1; }
+    else
+      echo "### (skip) $script not present"
+    fi
+done
+
+echo "PROVISION DONE"
+PROVISION
+chmod +x "$WORK/provision.sh"
+
+# Bind the repo into the container and run the provision script as PID 2.
+systemd-nspawn \
+  --directory="$WORK/rootfs" \
+  --machine="$MACHINE" \
+  --bind="$WORK/provision.sh:/runner-provision.sh" \
+  --bind="$WORK/runner-images:/runner-images" \
+  --setenv=RELEASE="$RELEASE" \
+  --setenv=ARCH="$ARCH" \
+  --setenv=RUNNER_VERSION="$RUNNER_VERSION" \
+  --as-pid2 \
+  /runner-provision.sh
+
+echo ">>> export rootfs"
+# Remove nspawn runtime mountpoints so they don't leak into the image.
+rm -rf "$WORK/rootfs/proc" "$WORK/rootfs/sys"
+mkdir -p "$WORK/rootfs/proc" "$WORK/rootfs/sys"
 
 TARBALL="$OUTPUT_DIR/actions-runner-image-full-${ARCH}.tar.gz"
-tar -czf "$TARBALL" -C "$FOUND" .
+tar -czf "$TARBALL" -C "$WORK/rootfs" .
 
 echo ""
 echo "Done. Full image: $TARBALL"

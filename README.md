@@ -94,10 +94,20 @@ sudo rm -rf /opt/runner/image
 sudo mv /opt/runner/work-rootfs /opt/runner/image
 ```
 
-For a full GitHub-hosted-compatible toolset, build with `distrobuilder` from
-the actions-runner-images recipe and copy the resulting rootfs to
-`/opt/runner/image`. Note nspawn boots a rootfs **directory** (`--directory=`),
-so use a rootfs output rather than an LXD squashfs.
+For a full GitHub-hosted-compatible toolset (option A), this repo ships
+`image/build-image-full.sh`: it debootstraps a base, boots it in a
+systemd-nspawn container, and runs the `actions/runner-images`
+`scripts/build/*.sh` scripts directly inside — no LXD or Packer needed
+(`actions/runner-images` build scripts are just a sequence of shell scripts;
+its Packer templates only loop over them). Trigger it via CI
+(`workflow_dispatch` → Type: **full**) or locally:
+
+```bash
+sudo bash image/build-image-full.sh /tmp/runner-image-full
+# → /tmp/runner-image-full/actions-runner-image-full-amd64.tar.gz
+```
+
+Expand it to `runner.image_path` the same way as the lightweight image.
 
 ### Configuration
 

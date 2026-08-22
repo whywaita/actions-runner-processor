@@ -94,7 +94,7 @@ It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://
 | Listener Loop | `github.com/actions/scaleset/listener` | Message loop, ack, and retry built in |
 | Auth | GitHub App (installation token) | Existing policy. Safer than PAT, scope-limited |
 | Sandbox | systemd-nspawn | Isolated container from a custom rootfs image. Ephemeral CoW root |
-| Custom Image | directory rootfs (`/opt/runner/image`) | Built declaratively by `image/build-image.sh` (debootstrap + chroot), baked in CI. Writable during job (sudo) |
+| Custom Image | directory rootfs (`/opt/runner/image`) | Lightweight (debootstrap) or full (systemd-nspawn + runner-images scripts) built by `image/build-*.sh`, baked in CI. Writable during job (sudo) |
 | Ephemeral Root | `--volatile=overlay` | Image as read-only lower; writes land on an overlay discarded on exit |
 | Runner | `actions/runner` (official) | No `--once --ephemeral` needed. Boot from JIT Config mode |
 | Process Manager | systemd | Auto-start on reboot, log management |
@@ -211,7 +211,7 @@ systemd-nspawn \
 # On job completion, just Kill(); systemd-nspawn cleans up the overlay and container
 ```
 
-- Custom image lives at `/opt/runner/image` on the host (`runner.image_path`). Built with `distrobuilder` / `debootstrap` + runner.
+- Custom image lives at `/opt/runner/image` on the host (`runner.image_path`). Built by `image/build-image.sh` (lightweight) or `image/build-image-full.sh` (full).
 - Networking is shared with the host (no `--private-network`) → only outbound HTTPS to reach GitHub.
 - The runner runs as **root** inside the container → `sudo` works in job steps.
 - The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.
@@ -223,34 +223,37 @@ Setting `runner.mode: "bwrap"` boots with the legacy bubblewrap (`--tmp-overlay`
 
 ### 3.3.2 Custom runner image generation
 
-`image/` ships a declarative builder for the nspawn rootfs.
+`image/` ships declarative builders for the nspawn rootfs. There are two:
 
 ```
 image/
-├── image.yaml           # manifest: base distro, arch, runner version, apt packages
-├── build-image.sh       # debootstrap + chroot provisioning + tar.gz
+├── image.yaml           # manifest for the lightweight image
+├── build-image.sh       # lightweight: debootstrap + chroot + tar.gz
+├── image-full.yaml      # manifest for the full image
+├── build-image-full.sh  # full: debootstrap + nspawn + runner-images scripts
 └── (built by) .github/workflows/build-image.yaml
 ```
 
-- `image/image.yaml` declares the base distribution/release, architecture, the
-  `actions/runner` version (`latest` resolves at build time), and extra apt
-  packages baked into the rootfs.
-- `image/build-image.sh` debootstraps the base, applies the packages and
-  installs `actions/runner` at `/opt/actions-runner` inside a chroot, then
-  packs the rootfs into `actions-runner-image-<arch>.tar.gz`.
-- `.github/workflows/build-image.yaml` runs it in CI (`workflow_dispatch`, or
-  push/PR touching `image/**`) and uploads the tarball as an artifact.
+**Lightweight (option B, default)** — `image/build-image.sh` debootstraps the
+base, applies the apt packages from `image/image.yaml` and installs
+`actions/runner` at `/opt/actions-runner` inside a chroot, then packs the
+rootfs into `actions-runner-image-<arch>.tar.gz`. Fast (minutes), runs on
+PRs/pushes and `workflow_dispatch`.
+
+**Full (option A)** — `image/build-image-full.sh` produces a
+GitHub-hosted-compatible toolset. `actions/runner-images` is built by running
+`images/ubuntu/scripts/build/*.sh` in order (its Packer templates are just a
+loop over these shell scripts), so this script debootstraps a base, boots it
+in a `systemd-nspawn` container (`--as-pid2`), and runs the same build scripts
+directly inside with the repo bind-mounted. **No LXD or Packer is needed.**
+Heavy (~1h, 50GB+), gated on `workflow_dispatch` → Type: **full**.
 
 The tarball is expanded to `runner.image_path` (default `/opt/runner/image`):
 
 ```bash
-sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner/image
+sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner/image     # B
+sudo tar -xzf actions-runner-image-full-amd64.tar.gz -C /opt/runner/image # A
 ```
-
-nspawn boots a rootfs **directory** (`--directory=`), so the image is a rootfs
-tarball, not an LXD squashfs. For a full GitHub-hosted-compatible toolset,
-build the actions-runner-images recipe with distrobuilder and use its rootfs
-output instead.
 
 ### 3.4 main entrypoint
 
@@ -499,8 +502,9 @@ The same `maxRunners` / `minRunners` apply across all Installations. Runners onl
 apt install systemd-container
 
 # 2. Build the custom runner image (place at /opt/runner/image)
-#    - Build an actions-runner-images-equivalent rootfs with distrobuilder, or
-#    - debootstrap a minimal rootfs and extract actions/runner into it
+#    Use the repo's builders: image/build-image.sh (lightweight) or
+#    image/build-image-full.sh (full GitHub-hosted-compatible toolset).
+#    Manual lightweight equivalent:
 RUNNER_VERSION="v2.326.0"
 sudo debootstrap --variant=minbase noble /opt/runner/work-rootfs
 sudo mkdir -p /opt/runner/work-rootfs/opt/actions-runner

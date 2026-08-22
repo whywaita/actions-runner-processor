@@ -86,29 +86,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install packer and shellcheck
+      - name: Install systemd-container, debootstrap and shellcheck
         run: |
           sudo apt-get update -y -qq
-          sudo apt-get install -y -qq shellcheck wget
-          wget -q -O- "https://apt.releases.hashicorp.com/gpg" \
-            | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
-            | sudo tee /etc/apt/sources.list.d/hashicorp.list >/dev/null
-          sudo apt-get update -y -qq
-          sudo apt-get install -y -qq packer
+          sudo apt-get install -y -qq systemd-container debootstrap shellcheck
 
-      - name: Setup LXD
-        uses: canonical/setup-lxd@v0.1.2
-        with:
-          channel: 5.21/stable
-
-      - name: Lint full-image shell scripts
-        run: shellcheck image/build-image-full.sh
+      - name: Lint image shell scripts
+        run: shellcheck image/build-image.sh image/build-image-full.sh
 
       - name: Build full rootfs
         run: |
           # Override the release manifest value via the dispatch input.
           sudo sed -i "s/^release:.*/release: \"${{ inputs.release }}\"/" image/image-full.yaml
+          # Build in the repo (build-image-full.sh binds the repo into the
+          # container so the runner-images checkout is available).
           sudo bash image/build-image-full.sh /tmp/runner-image-full
 
       - name: Upload full rootfs image
