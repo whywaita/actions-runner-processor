@@ -113,6 +113,11 @@ apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificate
 # for the sed -i edits to succeed as a no-op.
 touch /etc/waagent.conf
 
+# configure-environment.sh disables motd news metadata
+# (sed ENABLED=1 -> ENABLED=0 on /etc/default/motd-news). update-motd is not
+# installed, so create an empty file for the sed -i to succeed as a no-op.
+touch /etc/default/motd-news
+
 # GitHub-hosted Ubuntu 24.04 (noble) images manage apt sources through the
 # deb822 file /etc/apt/sources.list.d/ubuntu.sources; debootstrap's minbase
 # leaves a legacy /etc/apt/sources.list instead. configure-apt-sources.sh and
