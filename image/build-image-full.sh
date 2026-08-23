@@ -99,9 +99,14 @@ trap 'on_fail' ERR
 printf '#!/bin/sh\n# policy-rc.d: never start services during provisioning\nexit 101\n' > /usr/sbin/policy-rc.d
 chmod +x /usr/sbin/policy-rc.d
 
+# Make apt non-interactive for the whole build: several runner-images scripts
+# call apt-get without -y, and with stdin closed that would abort on the
+# "[Y/n] continue?" prompt. Force --assume-yes and quiet log level globally.
+printf 'APT::Get::Assume-Yes "true";\nAPT::Get::Quiet "1";\n' > /etc/apt/apt.conf.d/90assumeyes
+
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
+apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init
 
 # GitHub-hosted Ubuntu 24.04 (noble) images manage apt sources through the
 # deb822 file /etc/apt/sources.list.d/ubuntu.sources; debootstrap's minbase
