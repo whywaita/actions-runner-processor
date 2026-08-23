@@ -438,13 +438,15 @@ mkdir -p "$WORK/status"
 # call invoke-rc.d/systemctl operate against a running init (with policy-rc.d
 # still short-circuiting service starts during provisioning).
 #
-# Note: snap/configure-snap.sh is intentionally skipped. snapd must mount
-# squashfs images, which systemd-nspawn cannot do without CAP_SYS_ADMIN (and
-# loop devices); we deliberately keep the container sandboxed. Snap-dependent
-# tools are simply not installed in the full image.
+# install-docker.sh starts dockerd (and pulls images) during provisioning.
+# dockerd needs CAP_SYS_ADMIN to set up mount namespaces / storage mounts, so we
+# add it here. The same capability is granted in launchNspawn (runner.go) so
+# jobs can use docker at runtime. (snap/configure-snap.sh is still skipped:
+# snapd additionally needs loop devices for squashfs, which we don't provide.)
 systemd-nspawn \
   --directory="$WORK/rootfs" \
   --machine="$MACHINE" \
+  --capability=CAP_SYS_ADMIN \
   --bind="$WORK/provision.sh:/runner-provision.sh" \
   --bind="$WORK/runner-images:/runner-images" \
   --bind="$WORK/status:/provision" \
