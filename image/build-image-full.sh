@@ -195,6 +195,16 @@ export HELPER_SCRIPTS="$INSTALLER_SCRIPT_FOLDER/helpers"
 export HELPER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER/helpers"
 mkdir -p "$HELPER_SCRIPTS"
 cp -R /runner-images/images/ubuntu/scripts/helpers/* "$HELPER_SCRIPTS/"
+# Disable the Pester test harness: install-* scripts call invoke_tests (which
+# runs PowerShell Pester tests) at the end. We build the image in a bare nspawn
+# container with no test framework, so these would fail spuriously. Overwrite
+# the helper with a no-op; configure-environment.sh symlinks it to PATH.
+cat > "$HELPER_SCRIPTS/invoke-tests.sh" <<'INVA'
+#!/bin/bash
+# Test skeleton disabled for nspawn builds; image provisioning is the goal.
+exit 0
+INVA
+chmod +x "$HELPER_SCRIPTS/invoke-tests.sh"
 # packer places the per-release toolset at $INSTALLER_SCRIPT_FOLDER/toolset.json.
 cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
   "$INSTALLER_SCRIPT_FOLDER/toolset.json"
