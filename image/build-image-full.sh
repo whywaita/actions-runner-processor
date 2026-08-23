@@ -76,6 +76,13 @@ export DEBIAN_FRONTEND=noninteractive
 # Print the failing line on error so a silent `set -e` exit is diagnosable.
 trap 'echo ">>> PROVISION FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 
+# Prevent apt package postinst hooks from trying to start system services.
+# We are provisioning a headless nspawn container with no running systemd, so
+# invoke-rc.d would block on dbus/systemd sockets (seen as a silent hang after
+# package unpack). Returning 101 makes postinst skip service (re)start.
+printf '#!/bin/sh\n# policy-rc.d: never start services during provisioning\nexit 101\n' > /usr/sbin/policy-rc.d
+chmod +x /usr/sbin/policy-rc.d
+
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
 apt-get install -y -qq sudo git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
