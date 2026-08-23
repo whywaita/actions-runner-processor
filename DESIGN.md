@@ -6,7 +6,7 @@
 
 **actions-runner-processor** is a lightweight Go binary to run GitHub Actions self-hosted runners without Kubernetes.
 
-It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://github.com/actions/scaleset) (official GitHub SDK) Message Session API, and dynamically starts/destroys ephemeral runners isolated by [systemd-nspawn](https://systemd.io/). Each runner is booted from a custom image (a root filesystem), is writable during the job (`sudo` available), and is discarded on exit. The legacy bubblewrap backend is kept for backward compatibility under `runner.mode: "bwrap"`.
+It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://github.com/actions/scaleset) (official GitHub SDK) Message Session API, and dynamically starts/destroys ephemeral runners isolated by [systemd-nspawn](https://systemd.io/). Each runner is booted from a custom image (a root filesystem), is writable during the job (`sudo` available), and is discarded on exit.
 
 ### Design Principles
 
@@ -41,7 +41,7 @@ It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://
 │  │  │ Listener A    │  │ Listener B    │  ... (×N)     │  │
 │  │  │ (goroutine)   │  │ (goroutine)   │               │  │
 │  │  │               │  │               │               │  │
-│  │  │ scaleset. Client BwrapScaler     │  │ scaleset. Client BwrapScaler    │
+│  │  │ scaleset. Client Scaler        │  │ scaleset. Client Scaler         │
 │  │  └──────┬───────┘  └──────┬────────┘               │  │
 │  │         │                 │                          │  │
 │  │  ┌──────┴─────────────────┴──────────┐              │  │
@@ -126,12 +126,12 @@ func (c *Client) CreateMessageSession(ctx context.Context, owner string) (*scale
 
 **Responsibilities**: GitHub App auth, installation auto-discovery, scale set create/get, message session establishment.
 
-### 3.2 BwrapScaler
+### 3.2 Scaler
 
 `internal/scaler/` — implements the `listener.Scaler` interface.
 
 ```go
-type BwrapScaler struct {
+type Scaler struct {
     client     *scaleset.Client
     scaleSetID int
     maxRunners int
@@ -140,10 +140,10 @@ type BwrapScaler struct {
     runners    map[string]*runner.Runner  // RunnerName → Runner
 }
 
-func (s *BwrapScaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error
-func (s *BwrapScaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error
-func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error)
-func (s *BwrapScaler) Shutdown(ctx context.Context)  // graceful shutdown: kill all runners
+func (s *Scaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error
+func (s *Scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error
+func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error)
+func (s *Scaler) Shutdown(ctx context.Context)  // graceful shutdown: kill all runners
 ```
 
 **Responsibilities**: runner lifecycle management (launch, track, cleanup).
@@ -153,7 +153,7 @@ func (s *BwrapScaler) Shutdown(ctx context.Context)  // graceful shutdown: kill 
 `count` is `RunnerScaleSetStatistic.TotalAssignedJobs` (the total number of currently assigned jobs). The scaler scales runners toward `minRunners + count` (`maxRunners` is the upper bound).
 
 ```go
-func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
     current := len(s.runners)
     target := min(s.maxRunners, s.minRunners + count)
 
@@ -170,14 +170,12 @@ Runners are tracked by `RunnerName` (the name specified when issuing the JIT Con
 
 ### 3.3 Runner Launcher
 
-`internal/runner/` — starts the runner via systemd-nspawn (the legacy bubblewrap path remains under `mode: "bwrap"`).
+`internal/runner/` — starts the runner via systemd-nspawn.
 
 ```go
 type Runner struct {
     Name       string
     JITConfig  string
-    WorkDir    string
-    Mode       string
     ImagePath  string
     Entrypoint string
 }
@@ -216,10 +214,6 @@ systemd-nspawn \
 - The runner boots as the `runner` user inside the container (passwordless sudo) → `sudo` works in job steps. systemd-nspawn itself runs as host root.
 - The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.
 - When a runner process exits, its GitHub registration is removed using the runner ID from the JIT response.
-
-### 3.3.1 Legacy bubblewrap backend (backward compatible)
-
-Setting `runner.mode: "bwrap"` boots with the legacy bubblewrap (`--tmp-overlay`). System directories and the runner binary are temporary overlays and changes are discarded when the process exits. `/dev/null` masking and runner registration removal are shared with nspawn. In bwrap mode the processor removes `runner-xxxxxxxx` stale workspaces on startup.
 
 ### 3.3.2 Custom runner image generation
 
@@ -339,7 +333,7 @@ Design points for running N listeners (goroutines) concurrently in one process:
 
 ```go
 type Exporter struct {
-    scaler *scaler.BwrapScaler
+    scaler *scaler.Scaler
 }
 
 // Exposed metrics:
@@ -397,12 +391,9 @@ github:
 scale_set_name: "runner-listener"  # Scale Set name shared across all installations
 
 runner:
-  mode: "nspawn"                   # sandbox backend: "nspawn" (default) or "bwrap"
   image_path: "/opt/runner/image"  # custom runner image (rootfs directory)
   entrypoint: "/opt/actions-runner/run.sh"  # in-container boot command
-  version: "latest"                # actions/runner version; "latest" auto-resolves (bwrap mode)
-  actions_runner_path: "/opt/runner/actions-runner"   # bwrap mode only
-  workspace_root: "/opt/runner/workspaces"  # bwrap mode only
+  version: "latest"                # actions/runner version (informational)
 
 metrics:
   enabled: true
@@ -588,7 +579,7 @@ actions-runner-processor/
 │   ├── metrics/
 │   │   └── metrics.go            # Prometheus exporter
 │   ├── runner/
-│   │   └── runner.go             # nspawn (default) / bwrap runner launch
+│   │   └── runner.go             # systemd-nspawn runner launch
 │   ├── scaler/
 │   │   └── scaler.go             # listener.Scaler implementation
 │   └── webui/

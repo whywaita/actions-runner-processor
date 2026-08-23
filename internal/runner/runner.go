@@ -1,6 +1,5 @@
-// Package runner handles launching ephemeral GitHub Actions runners
-// inside an isolated sandbox (systemd-nspawn by default, bubblewrap as a
-// deprecated fallback).
+// Package runner handles launching ephemeral GitHub Actions runners inside an
+// isolated systemd-nspawn container.
 package runner
 
 import (
@@ -14,30 +13,18 @@ import (
 
 // Runner represents a running ephemeral runner instance.
 type Runner struct {
-	Name              string
-	JITConfig         string
-	ActionsRunnerPath string
-	WorkDir           string
-	MaskedPaths       []string
+	Name        string
+	JITConfig   string
+	MaskedPaths []string
 
-	// Mode is the sandbox backend: "nspawn" (default) or "bwrap".
-	Mode       string
-	ImagePath  string // nspawn: root filesystem directory (custom image)
-	Entrypoint string // nspawn: absolute path (in-container) of the boot command
+	ImagePath  string // root filesystem directory (custom image)
+	Entrypoint string // absolute path (in-container) of the boot command
 
 	cmd    *exec.Cmd
 	output *bytes.Buffer
 }
 
-// Launch starts a runner in an isolated sandbox.
-func Launch(ctx context.Context, r *Runner) error {
-	if r.Mode == "bwrap" {
-		return launchBwrap(ctx, r)
-	}
-	return launchNspawn(ctx, r)
-}
-
-// launchNspawn boots the runner in a systemd-nspawn container.
+// Launch boots a runner in a systemd-nspawn container.
 //
 // The container boots from the custom image directory (ImagePath) with an
 // ephemeral overlayed root (--volatile=overlay): the image is mounted
@@ -50,7 +37,7 @@ func Launch(ctx context.Context, r *Runner) error {
 // so dockerd (and thus `docker` in job steps) can run inside the container:
 // CAP_SYS_ADMIN covers storage/mount namespaces, CAP_NET_ADMIN the netfilter
 // (iptables) bridge network driver.
-func launchNspawn(ctx context.Context, r *Runner) error {
+func Launch(ctx context.Context, r *Runner) error {
 	args := []string{
 		"--quiet",
 		"--directory=" + r.ImagePath,
@@ -89,64 +76,6 @@ func launchNspawn(ctx context.Context, r *Runner) error {
 		return fmt.Errorf("systemd-nspawn start: %w", err)
 	}
 	return nil
-}
-
-// launchBwrap starts the runner in a bubblewrap sandbox (deprecated).
-func launchBwrap(ctx context.Context, r *Runner) error {
-	cmd := exec.CommandContext(ctx, "bwrap", buildArgs(r)...)
-	cmd.Env = append(cmd.Environ(),
-		"ACTIONS_RUNNER_INPUT_JITCONFIG="+r.JITConfig,
-		"HOME=/home/runner",
-		"RUNNER_ALLOW_RUNASROOT=1",
-	)
-
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	r.output = &output
-	r.cmd = cmd
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("bwrap start: %w", err)
-	}
-	return nil
-}
-
-func buildArgs(r *Runner) []string {
-	args := []string{
-		"--overlay-src", "/usr", "--tmp-overlay", "/usr",
-		"--overlay-src", "/lib", "--tmp-overlay", "/lib",
-		"--overlay-src", "/lib64", "--tmp-overlay", "/lib64",
-		"--overlay-src", "/bin", "--tmp-overlay", "/bin",
-		"--overlay-src", "/sbin", "--tmp-overlay", "/sbin",
-		"--overlay-src", "/etc", "--tmp-overlay", "/etc",
-		"--overlay-src", "/var", "--tmp-overlay", "/var",
-		"--overlay-src", r.ActionsRunnerPath, "--tmp-overlay", "/actions-runner",
-		"--tmpfs", "/run",
-		"--dir", "/run/systemd",
-		"--dir", "/run/systemd/resolve",
-		"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-		"--ro-bind", "/etc/hosts", "/etc/hosts",
-		"--dev", "/dev",
-		"--proc", "/proc",
-		"--tmpfs", "/home/runner",
-		"--tmpfs", "/tmp",
-		"--bind", r.WorkDir, "/actions-runner/_work",
-		"--unshare-all",
-		"--share-net",
-		"--uid", "0",
-		"--gid", "0",
-		"--die-with-parent",
-		"--new-session",
-		"--chdir", "/actions-runner",
-	}
-	for _, path := range r.MaskedPaths {
-		if !isWithin(path, "/etc") {
-			continue
-		}
-		args = append(args, "--ro-bind", "/dev/null", path)
-	}
-	return append(args, "/actions-runner/run.sh")
 }
 
 func isWithin(path, root string) bool {

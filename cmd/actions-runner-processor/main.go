@@ -1,7 +1,6 @@
 // actions-runner-processor is a lightweight GitHub Actions self-hosted runner processor.
 // It discovers GitHub App installations, creates runner scale sets, and
-// launches ephemeral runners in systemd-nspawn containers (bubblewrap as a
-// deprecated fallback).
+// launches ephemeral runners in systemd-nspawn containers.
 package main
 
 import (
@@ -11,10 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"regexp"
-	"slices"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -26,8 +21,6 @@ import (
 	"github.com/whywaita/actions-runner-processor/internal/scaler"
 	"github.com/whywaita/actions-runner-processor/internal/webui"
 )
-
-var runnerWorkspacePattern = regexp.MustCompile(`^runner-[0-9a-f]{8}$`)
 
 func main() {
 	cfg, err := config.Load()
@@ -44,19 +37,6 @@ func main() {
 		slog.Error("preflight check failed", "error", perr)
 		os.Exit(1)
 	}
-	// In bwrap mode, clean up stale runner workspaces from crashed runs.
-	// nspawn keeps no host workspaces (the ephemeral overlay is auto-cleaned).
-	if cfg.Runner.Mode == "bwrap" {
-		removedWorkspaces, cleanupErr := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
-		if cleanupErr != nil {
-			slog.Error("failed to clean stale runner workspaces", "error", cleanupErr)
-			os.Exit(1)
-		}
-		if removedWorkspaces > 0 {
-			slog.Info("cleaned stale runner workspaces", "count", removedWorkspaces)
-		}
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -170,10 +150,7 @@ func main() {
 				scaleSet.ID,
 				maxRunners,
 				cfg.Runner.MinRunners,
-				cfg.Runner.ActionsRunnerPath,
-				cfg.Runner.WorkspaceRoot,
 				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
-				cfg.Runner.Mode,
 				cfg.Runner.ImagePath,
 				cfg.Runner.Entrypoint,
 			)
@@ -222,26 +199,6 @@ func setupLogging(format string) {
 // preflight verifies that all runtime prerequisites are met before
 // starting any listeners. Returns an error describing the first failure.
 func preflight(cfg *config.Config) error {
-	if cfg.Runner.Mode == "bwrap" {
-		checks := []struct {
-			name string
-			fn   func() error
-		}{
-			{"bwrap binary", checkBinary("bwrap")},
-			{"bwrap --tmp-overlay support", checkCommandOption("bwrap", "--tmp-overlay")},
-			{"actions-runner directory", checkDir(cfg.Runner.ActionsRunnerPath)},
-			{"workspaces directory", checkDir(cfg.Runner.WorkspaceRoot)},
-		}
-		for _, c := range checks {
-			if err := c.fn(); err != nil {
-				return fmt.Errorf("%s: %w", c.name, err)
-			}
-			slog.Info("preflight check passed", "check", c.name)
-		}
-		return nil
-	}
-
-	// nspawn mode (default)
 	checks := []struct {
 		name string
 		fn   func() error
@@ -255,7 +212,6 @@ func preflight(cfg *config.Config) error {
 		}
 		slog.Info("preflight check passed", "check", c.name)
 	}
-	slog.Info("running with sandbox mode", "mode", cfg.Runner.Mode)
 	return nil
 }
 
@@ -282,45 +238,9 @@ func checkDir(path string) func() error {
 	}
 }
 
-func checkCommandOption(name, option string) func() error {
-	return func() error {
-		output, err := exec.Command(name, "--help").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("run %s --help: %w", name, err)
-		}
-		if !hasCommandOption(output, option) {
-			return fmt.Errorf("%s does not support %s", name, option)
-		}
-		return nil
-	}
-}
-
-func hasCommandOption(help []byte, option string) bool {
-	return slices.Contains(strings.Fields(string(help)), option)
-}
-
 func configPath() string {
 	if path := os.Getenv("CONFIG_PATH"); path != "" {
 		return path
 	}
 	return "/etc/actions-runner-processor/config.yaml"
-}
-
-func cleanupRunnerWorkspaces(root string) (int, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return 0, fmt.Errorf("read workspace root: %w", err)
-	}
-
-	removed := 0
-	for _, entry := range entries {
-		if !entry.IsDir() || !runnerWorkspacePattern.MatchString(entry.Name()) {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
-			return removed, fmt.Errorf("remove workspace %s: %w", entry.Name(), err)
-		}
-		removed++
-	}
-	return removed, nil
 }

@@ -121,7 +121,6 @@ github:
 scale_set_name: "actions-runner-processor"
 
 runner:
-  mode: "nspawn"                                   # sandbox backend: "nspawn" (default) or "bwrap"
   image_path: "/opt/runner/image"                  # custom runner image rootfs
   entrypoint: "/opt/actions-runner/run.sh"         # in-container boot command
   max_runners: 4                                   # 0 = runtime.NumCPU()
