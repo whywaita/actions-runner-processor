@@ -104,9 +104,16 @@ chmod +x /usr/sbin/policy-rc.d
 # "[Y/n] continue?" prompt. Force --assume-yes and quiet log level globally.
 printf 'APT::Get::Assume-Yes "true";\nAPT::Get::Quiet "1";\n' > /etc/apt/apt.conf.d/90assumeyes
 
+# Pin the debconf frontend to noninteractive so dpkg-reconfigure calls in
+# runner-images scripts (e.g. configure-environment.sh reconfigures man-db)
+# never block on an interactive prompt, and pre-seed the man-db answer so
+# dpkg-reconfigure man-db succeeds without input.
+export DEBIAN_FRONTEND=noninteractive
+echo "man-db man-db/auto-update boolean false" | debconf-set-selections
+
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart
+apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db
 
 # configure-environment.sh edits Azure-specific /etc/waagent.conf (swap
 # settings). The nspawn rootfs has no Azure agent, so create an empty config
