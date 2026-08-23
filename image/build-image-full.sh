@@ -132,6 +132,14 @@ chmod +x /usr/sbin/policy-rc.d
 # "[Y/n] continue?" prompt. Force --assume-yes and quiet log level globally.
 printf 'APT::Get::Assume-Yes "true";\nAPT::Get::Quiet "1";\n' > /etc/apt/apt.conf.d/90assumeyes
 
+# install-container-tools.sh only installs the podman AppArmor profile (and
+# calls apparmor_parser) when unprivileged user namespaces are restricted on
+# the kernel. In nspawn we keep unprivileged userns available anyway, which is
+# also what rootless podman needs; setting it to 0 makes that branch a no-op and
+# avoids depending on apparmor_parser inside the container.
+sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || \
+  echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true
+
 # Pin the debconf frontend to noninteractive so dpkg-reconfigure calls in
 # runner-images scripts (e.g. configure-environment.sh reconfigures man-db)
 # never block on an interactive prompt, and pre-seed the man-db answer so
