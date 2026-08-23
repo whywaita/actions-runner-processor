@@ -78,13 +78,6 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y -qq
 apt-get install -y -qq sudo git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
 
-# runner-images scripts are shebanged as "#!/bin/bash -e" (fail-fast), but when
-# run as "bash \$script" the shebang options are stripped, so a failing toolchain
-# step no longer aborts the whole build. Export the same fail-fast semantics and
-# make sure any non-zero step aborts here instead of silently hanging.
-set -E
-export SHELLOPTS=errexit:pipefail
-
 # Install the GitHub Actions runner (used as the boot entrypoint).
 if [ -n "${RUNNER_VERSION:-}" ] && [ "${RUNNER_VERSION}" != "latest" ]; then
   VER="${RUNNER_VERSION}"
