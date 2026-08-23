@@ -64,7 +64,9 @@ if [[ "$RUNNER_IMAGES_REF" != "latest" ]]; then
 fi
 
 echo ">>> debootstrap base ($RELEASE, $CODENAME, $ARCH)"
-debootstrap --variant=minbase --arch="$ARCH" "$CODENAME" "$WORK/rootfs" "http://archive.ubuntu.com/ubuntu/"
+# Use the default variant (not minbase) so systemd is installed in the rootfs;
+# systemd-nspawn --boot requires systemd as PID 1 inside the container.
+debootstrap --arch="$ARCH" "$CODENAME" "$WORK/rootfs" "http://archive.ubuntu.com/ubuntu/"
 
 cp /etc/resolv.conf "$WORK/rootfs/etc/resolv.conf" 2>/dev/null || true
 
@@ -99,7 +101,7 @@ chmod +x /usr/sbin/policy-rc.d
 
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
+apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
 
 # GitHub-hosted Ubuntu 24.04 (noble) images manage apt sources through the
 # deb822 file /etc/apt/sources.list.d/ubuntu.sources; debootstrap's minbase
