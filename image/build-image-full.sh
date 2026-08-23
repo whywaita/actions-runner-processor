@@ -150,6 +150,18 @@ echo "man-db man-db/auto-update boolean false" | debconf-set-selections
 apt-get update -y -qq
 apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db apparmor
 
+# Create a dedicated runner user, mirroring GitHub-hosted / actions-runner-images
+# convention (see whywaita/actions-runner-images-lxd lxd.patch): a `runner`
+# user with a known password, added to the sudo group, and passwordless sudo so
+# job steps that call sudo work as expected. The runner process boots as this
+# user (launchNspawn passes --user=runner) while systemd-nspawn itself runs as
+# host root.
+apt-get install -y -qq whois
+runner_pass="$(echo runner | mkpasswd -s -m sha-512)"
+useradd -m -d /home/runner -s /bin/bash -u 1001 -U -p "$runner_pass" runner
+gpasswd -a runner sudo
+echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
 # install-container-tools.sh generates a podman AppArmor profile and calls
 # apparmor_parser to load it. Loading AppArmor profiles into the host kernel is
 # not possible (nor meaningful) from inside nspawn, and on our runtime hosts
@@ -232,6 +244,12 @@ mkdir -p /opt/actions-runner
 curl -sL "https://github.com/actions/runner/releases/download/${VER}/actions-runner-linux-${RUNNER_ARCH}-${TRIM}.tar.gz" \
   | tar xz -C /opt/actions-runner
 chmod +x /opt/actions-runner/run.sh
+# The runner boots as the `runner` user, so the runner install tree must be
+# owned (and writable) by that user: run.sh writes _diag/_work/_temp and the
+# registration state under /opt/actions-runner.
+chown -R runner:runner /opt/actions-runner
+mkdir -p /opt/actions-runner/_diag /opt/actions-runner/_temp /opt/actions-runner/_work
+chown -R runner:runner /opt/actions-runner/_diag /opt/actions-runner/_temp /opt/actions-runner/_work
 
 # Fresh OS inside the container; run every runner-images build script in a
 # stable, conventional order, mirroring what packer does in
@@ -267,14 +285,16 @@ cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
 # Bazelisk (and other tools) need a cache-dir anchor to locate their download
-# cache. Provisioning runs as root, so point HOME/XDG_CACHE_HOME at /root.
-export HOME=/root
-export XDG_CACHE_HOME=/root/.cache
+# cache. Point them at the runner user's home so tool caches land under
+# /home/runner (GitHub layout); we chown /home/runner to runner after the
+# build loop. Provisioning itself runs as root inside the container.
+export HOME=/home/runner
+export XDG_CACHE_HOME=/home/runner/.cache
 # packer sets IMAGE_FOLDER=/imagegeneration; configure-system.sh chmods it.
 export IMAGE_FOLDER=/imagegeneration
 # packer passes IMAGEDATA_FILE to configure-image-data.sh.
 export IMAGEDATA_FILE=/imagegeneration/imagedata.json
-mkdir -p /imagegeneration /root/.cache
+mkdir -p /imagegeneration /home/runner/.cache
 
 # packer uploads assets/post-gen to the image folder and renames it to
 # post-generation; configure-system.sh moves it to /opt. Reproduce that here
@@ -372,6 +392,11 @@ TRAPEOF
       echo "### (skip) $script not present"
     fi
 done
+
+# The runner-images scripts (running as root) may have written tool caches
+# under /home/runner — hand them back to the runner user so the image matches
+# the GitHub layout where the runner user owns its home directory.
+chown -R runner:runner /home/runner
 
 echo "PROVISION DONE"
 # Power the container off so systemd-nspawn returns on the host; the host reads
