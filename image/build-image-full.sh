@@ -78,6 +78,30 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y -qq
 apt-get install -y -qq sudo git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
 
+# GitHub-hosted Ubuntu 24.04 (noble) images manage apt sources through the
+# deb822 file /etc/apt/sources.list.d/ubuntu.sources; debootstrap's minbase
+# leaves a legacy /etc/apt/sources.list instead. configure-apt-sources.sh and
+# configure-apt.sh operate on ubuntu.sources for >=24.04, so mirror the
+# GitHub layout: write the deb822 ubuntu.sources and drop the legacy one.
+if [ "${RELEASE}" != "22.04" ]; then
+  CODENAME_REL="$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)"
+  cat > /etc/apt/sources.list.d/ubuntu.sources <<APTEOF
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: ${CODENAME_REL} ${CODENAME_REL}-updates ${CODENAME_REL}-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: ${CODENAME_REL}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+APTEOF
+  rm -f /etc/apt/sources.list
+  apt-get update -y -qq
+fi
+
 # Install the GitHub Actions runner (used as the boot entrypoint).
 if [ -n "${RUNNER_VERSION:-}" ] && [ "${RUNNER_VERSION}" != "latest" ]; then
   VER="${RUNNER_VERSION}"
