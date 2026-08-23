@@ -199,6 +199,7 @@ systemd-nspawn \
   --volatile=overlay \                                # ephemeral overlay root (discarded)
   --as-pid2 \                                         # run entrypoint as PID 2
   --user=runner \                                     # boot runner process as `runner` (sudo available)
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \            # dockerd: storage + netfilter (iptables bridge)
   --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=... \
   --machine="${R_NAME}" \
   --bind-ro=/etc/resolv.conf \

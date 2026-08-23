@@ -387,7 +387,16 @@ for script in \
       cat > "$BASH_ENV" <<'TRAPEOF'
 trap 'echo ">>> FAILED line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
 TRAPEOF
-      bash -eE "$script" || { echo "FAILED: $script" >&2; echo "FAILED:$script" > "$STATUS_FILE" 2>/dev/null || true; exit 1; }
+      bash -eE "$script" || {
+        echo "FAILED: $script" >&2
+        # Systemd-managed services that fail (e.g. dockerd in install-docker.sh)
+        # log their real error to the journal, which is otherwise not captured
+        # in the workflow log. Dump the tail so the root cause is visible.
+        echo "--- journal tail (last 80 lines) ---" >&2
+        journalctl --no-pager -n 80 2>/dev/null | sed 's/^/[journal] /' >&2 || true
+        echo "FAILED:$script" > "$STATUS_FILE" 2>/dev/null || true
+        exit 1
+      }
     else
       echo "### (skip) $script not present"
     fi
@@ -438,13 +447,16 @@ mkdir -p "$WORK/status"
 # call invoke-rc.d/systemctl operate against a running init (with policy-rc.d
 # still short-circuiting service starts during provisioning).
 #
-# Note: snap/configure-snap.sh is intentionally skipped. snapd must mount
-# squashfs images, which systemd-nspawn cannot do without CAP_SYS_ADMIN (and
-# loop devices); we deliberately keep the container sandboxed. Snap-dependent
-# tools are simply not installed in the full image.
+# install-docker.sh starts dockerd (and pulls images) during provisioning.
+# dockerd needs CAP_SYS_ADMIN (mount namespaces / storage) and CAP_NET_ADMIN
+# (netfilter/iptables for the bridge network driver), so we add both here. The
+# same capabilities are granted in launchNspawn (runner.go) so jobs can use
+# docker at runtime. (snap/configure-snap.sh is still skipped: snapd
+# additionally needs loop devices for squashfs, which we don't provide.)
 systemd-nspawn \
   --directory="$WORK/rootfs" \
   --machine="$MACHINE" \
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \
   --bind="$WORK/provision.sh:/runner-provision.sh" \
   --bind="$WORK/runner-images:/runner-images" \
   --bind="$WORK/status:/provision" \
