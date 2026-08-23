@@ -113,7 +113,7 @@ echo "man-db man-db/auto-update boolean false" | debconf-set-selections
 
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db apparmor snapd
+apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db
 
 # configure-environment.sh edits Azure-specific /etc/waagent.conf (swap
 # settings). The nspawn rootfs has no Azure agent, so create an empty config
@@ -212,7 +212,6 @@ for script in \
   configure-image-data.sh \
   configure-environment.sh \
   configure-system.sh \
-  configure-snap.sh \
   configure-pipx.sh \
   install-apt-vital.sh \
   install-powershell.sh \
@@ -329,16 +328,13 @@ mkdir -p "$WORK/status"
 # call invoke-rc.d/systemctl operate against a running init (with policy-rc.d
 # still short-circuiting service starts during provisioning).
 #
-# snap support: snapd must mount squashfs images, which requires the squashfs
-# kernel module and CAP_SYS_ADMIN (new filesystem mounts). systemd-nspawn
-# strips CAP_SYS_ADMIN by default, so grant it explicitly for the build.
-# Ensure the squashfs module is loaded on the host first.
-modprobe squashfs 2>/dev/null || true
-grep -q squashfs /proc/filesystems || echo "warning: squashfs not available in host kernel"
+# Note: snap/configure-snap.sh is intentionally skipped. snapd must mount
+# squashfs images, which systemd-nspawn cannot do without CAP_SYS_ADMIN (and
+# loop devices); we deliberately keep the container sandboxed. Snap-dependent
+# tools are simply not installed in the full image.
 systemd-nspawn \
   --directory="$WORK/rootfs" \
   --machine="$MACHINE" \
-  --capability=CAP_SYS_ADMIN \
   --bind="$WORK/provision.sh:/runner-provision.sh" \
   --bind="$WORK/runner-images:/runner-images" \
   --bind="$WORK/status:/provision" \
