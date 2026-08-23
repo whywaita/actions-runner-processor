@@ -169,6 +169,9 @@ cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
   "$INSTALLER_SCRIPT_FOLDER/toolset.json"
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
+# packer passes IMAGEDATA_FILE to configure-image-data.sh.
+export IMAGEDATA_FILE=/imagegeneration/imagedata.json
+mkdir -p /imagegeneration
 
 cd /runner-images/images/ubuntu/scripts/build
 for script in \
