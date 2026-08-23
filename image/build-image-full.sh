@@ -78,19 +78,29 @@ export DEBIAN_FRONTEND=noninteractive
 # Write the final status to the bind-mounted /provision/status so the host
 # can tell success from failure after the container powers itself off.
 STATUS_FILE=/provision/status
+poweroff_self() {
+  # Ensure the container always powers itself off so systemd-nspawn on the host
+  # returns and the CI job fails promptly instead of hanging until timeout.
+  sync
+  systemctl poweroff 2>/dev/null || true
+}
 on_fail() {
   echo ">>> PROVISION FAILED at line $LINENO: $BASH_COMMAND" >&2
   echo "FAILED:$LINENO" > "$STATUS_FILE" 2>/dev/null || true
-  sync
-  systemctl poweroff
+  poweroff_self
 }
 finish_ok() {
   echo "PROVISION DONE" >&2
   echo "OK" > "$STATUS_FILE" 2>/dev/null || true
-  sync
-  systemctl poweroff
+  poweroff_self
 }
+# Whatever path this script exits by (command failure, child-script failure, a
+# stray 'exit', or a signal), make sure the container powers off so the host
+# nspawn call returns and the job does not run until timeout. We only power off
+# on exit when provisioning did not already complete OK (finish_ok calls
+# poweroff itself and then exits, so this is idempotent).
 trap 'on_fail' ERR
+trap 'trap - EXIT; [ "$(cat "$STATUS_FILE" 2>/dev/null)" = "OK" ] || poweroff_self' EXIT
 
 # Prevent apt package postinst hooks from trying to start system services.
 # We are provisioning a headless nspawn container with no running systemd, so
@@ -282,7 +292,7 @@ for script in \
       cat > "$BASH_ENV" <<'TRAPEOF'
 trap 'echo ">>> FAILED line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
 TRAPEOF
-      bash -eE "$script" || { echo "FAILED: $script" >&2; exit 1; }
+      bash -eE "$script" || { echo "FAILED: $script" >&2; echo "FAILED:$script" > "$STATUS_FILE" 2>/dev/null || true; exit 1; }
     else
       echo "### (skip) $script not present"
     fi
