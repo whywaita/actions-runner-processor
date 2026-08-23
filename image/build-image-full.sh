@@ -76,7 +76,14 @@ export DEBIAN_FRONTEND=noninteractive
 
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo git curl jq ca-certificates locales
+apt-get install -y -qq sudo git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
+
+# runner-images scripts are shebanged as "#!/bin/bash -e" (fail-fast), but when
+# run as "bash \$script" the shebang options are stripped, so a failing toolchain
+# step no longer aborts the whole build. Export the same fail-fast semantics and
+# make sure any non-zero step aborts here instead of silently hanging.
+set -E
+export SHELLOPTS=errexit:pipefail
 
 # Install the GitHub Actions runner (used as the boot entrypoint).
 if [ -n "${RUNNER_VERSION:-}" ] && [ "${RUNNER_VERSION}" != "latest" ]; then
@@ -174,13 +181,20 @@ for script in \
   ; do
     if [ -f "$script" ]; then
       echo "### running $script"
-      bash "$script" || { echo "FAILED: $script" >&2; exit 1; }
+      # Run with bash -e so the script's shebang fail-fast semantics are honoured
+      # even when invoked explicitly (plain "bash \$script" strips #! options).
+      bash -e "$script" || { echo "FAILED: $script" >&2; exit 1; }
     else
       echo "### (skip) $script not present"
     fi
 done
 
 echo "PROVISION DONE"
+# Ensure the container shuts down so systemd-nspawn returns on the host.
+# (--as-pid2 boots a stub PID 1 that should terminate on exit; poweroff is
+# belt-and-suspenders. Ignore failure so it can't mask a real build error.)
+sync
+poweroff || true
 PROVISION
 chmod +x "$WORK/provision.sh"
 
