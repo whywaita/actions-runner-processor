@@ -387,7 +387,16 @@ for script in \
       cat > "$BASH_ENV" <<'TRAPEOF'
 trap 'echo ">>> FAILED line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
 TRAPEOF
-      bash -eE "$script" || { echo "FAILED: $script" >&2; echo "FAILED:$script" > "$STATUS_FILE" 2>/dev/null || true; exit 1; }
+      bash -eE "$script" || {
+        echo "FAILED: $script" >&2
+        # Systemd-managed services that fail (e.g. dockerd in install-docker.sh)
+        # log their real error to the journal, which is otherwise not captured
+        # in the workflow log. Dump the tail so the root cause is visible.
+        echo "--- journal tail (last 80 lines) ---" >&2
+        journalctl --no-pager -n 80 2>/dev/null | sed 's/^/[journal] /' >&2 || true
+        echo "FAILED:$script" > "$STATUS_FILE" 2>/dev/null || true
+        exit 1
+      }
     else
       echo "### (skip) $script not present"
     fi
