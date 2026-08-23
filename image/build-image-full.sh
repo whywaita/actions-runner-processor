@@ -73,8 +73,22 @@ cat > "$WORK/provision.sh" <<'PROVISION'
 #!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-# Print the failing line on error so a silent `set -e` exit is diagnosable.
-trap 'echo ">>> PROVISION FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+# Write the final status to the bind-mounted /provision/status so the host
+# can tell success from failure after the container powers itself off.
+STATUS_FILE=/provision/status
+on_fail() {
+  echo ">>> PROVISION FAILED at line $LINENO: $BASH_COMMAND" >&2
+  echo "FAILED:$LINENO" > "$STATUS_FILE" 2>/dev/null || true
+  sync
+  systemctl poweroff
+}
+finish_ok() {
+  echo "PROVISION DONE" >&2
+  echo "OK" > "$STATUS_FILE" 2>/dev/null || true
+  sync
+  systemctl poweroff
+}
+trap 'on_fail' ERR
 
 # Prevent apt package postinst hooks from trying to start system services.
 # We are provisioning a headless nspawn container with no running systemd, so
@@ -226,25 +240,66 @@ for script in \
 done
 
 echo "PROVISION DONE"
-# Ensure the container shuts down so systemd-nspawn returns on the host.
-# (--as-pid2 boots a stub PID 1 that should terminate on exit; poweroff is
-# belt-and-suspenders. Ignore failure so it can't mask a real build error.)
-sync
-poweroff || true
+# Power the container off so systemd-nspawn returns on the host; the host reads
+# the shared status file to learn success/failure.
+finish_ok
 PROVISION
 chmod +x "$WORK/provision.sh"
 
-# Bind the repo into the container and run the provision script as PID 2.
+# Register the provision script as a one-shot systemd unit so it runs once at
+# container boot (--boot). The unit powers the machine off when done.
+MKDIR_P="$WORK/rootfs/etc/systemd/system"
+mkdir -p "$MKDIR_P"
+cat > "$MKDIR_P/runner-provision.service" <<'UNIT'
+[Unit]
+Description=actions-runner-processor full image provisioning
+After=multi-user.target
+
+[Service]
+Type=oneshot
+Environment=DEBIAN_FRONTEND=noninteractive
+ExecStart=/runner-provision.sh
+TimeoutStopSec=300
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+ln -sf /etc/systemd/system/runner-provision.service \
+  "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/runner-provision.service"
+
+# Host-side status dir bind-mounted into the container.
+mkdir -p "$WORK/status"
+
+# Boot the container with real systemd (--boot) so package postinst hooks that
+# call invoke-rc.d/systemctl operate against a running init (with policy-rc.d
+# still short-circuiting service starts during provisioning).
 systemd-nspawn \
   --directory="$WORK/rootfs" \
   --machine="$MACHINE" \
   --bind="$WORK/provision.sh:/runner-provision.sh" \
   --bind="$WORK/runner-images:/runner-images" \
+  --bind="$WORK/status:/provision" \
   --setenv=RELEASE="$RELEASE" \
   --setenv=ARCH="$ARCH" \
   --setenv=RUNNER_VERSION="$RUNNER_VERSION" \
-  --as-pid2 \
-  /runner-provision.sh
+  --boot
+
+# Verify the provisioning result via the bind-mounted status file written by
+# the provision script (OK / FAILED:<line>) before exporting the rootfs.
+if [ -f "$WORK/status/status" ]; then
+  STATUS="$(cat "$WORK/status/status")"
+  echo "provision status: $STATUS"
+  case "$STATUS" in
+    OK) : ;;
+    FAILED:*) echo "error: provisioning failed in container ($STATUS)" >&2; exit 1 ;;
+    *)  echo "error: unexpected provision status '$STATUS'" >&2; exit 1 ;;
+  esac
+else
+  echo "error: container did not write a provision status file" >&2
+  exit 1
+fi
 
 echo ">>> export rootfs"
 # Remove nspawn runtime mountpoints so they don't leak into the image.
