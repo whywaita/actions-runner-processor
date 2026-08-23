@@ -99,9 +99,31 @@ trap 'on_fail' ERR
 printf '#!/bin/sh\n# policy-rc.d: never start services during provisioning\nexit 101\n' > /usr/sbin/policy-rc.d
 chmod +x /usr/sbin/policy-rc.d
 
+# Make apt non-interactive for the whole build: several runner-images scripts
+# call apt-get without -y, and with stdin closed that would abort on the
+# "[Y/n] continue?" prompt. Force --assume-yes and quiet log level globally.
+printf 'APT::Get::Assume-Yes "true";\nAPT::Get::Quiet "1";\n' > /etc/apt/apt.conf.d/90assumeyes
+
+# Pin the debconf frontend to noninteractive so dpkg-reconfigure calls in
+# runner-images scripts (e.g. configure-environment.sh reconfigures man-db)
+# never block on an interactive prompt, and pre-seed the man-db answer so
+# dpkg-reconfigure man-db succeeds without input.
+export DEBIAN_FRONTEND=noninteractive
+echo "man-db man-db/auto-update boolean false" | debconf-set-selections
+
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
+apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db
+
+# configure-environment.sh edits Azure-specific /etc/waagent.conf (swap
+# settings). The nspawn rootfs has no Azure agent, so create an empty config
+# for the sed -i edits to succeed as a no-op.
+touch /etc/waagent.conf
+
+# configure-environment.sh disables motd news metadata
+# (sed ENABLED=1 -> ENABLED=0 on /etc/default/motd-news). update-motd is not
+# installed, so create an empty file for the sed -i to succeed as a no-op.
+touch /etc/default/motd-news
 
 # GitHub-hosted Ubuntu 24.04 (noble) images manage apt sources through the
 # deb822 file /etc/apt/sources.list.d/ubuntu.sources; debootstrap's minbase
@@ -156,7 +178,11 @@ chmod +x /opt/actions-runner/run.sh
 export INSTALLER_SCRIPT_FOLDER=/opt/runner-images-scripts
 mkdir -p "$INSTALLER_SCRIPT_FOLDER"
 cp -R /runner-images/images/ubuntu/scripts/build/* "$INSTALLER_SCRIPT_FOLDER/"
+# packer sets both HELPER_SCRIPTS and HELPER_SCRIPT_FOLDER to the helper dir:
+# some scripts (configure-environment.sh) read HELPER_SCRIPTS, others
+# (configure-system.sh) read HELPER_SCRIPT_FOLDER.
 export HELPER_SCRIPTS="$INSTALLER_SCRIPT_FOLDER/helpers"
+export HELPER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER/helpers"
 mkdir -p "$HELPER_SCRIPTS"
 cp -R /runner-images/images/ubuntu/scripts/helpers/* "$HELPER_SCRIPTS/"
 # packer places the per-release toolset at $INSTALLER_SCRIPT_FOLDER/toolset.json.
@@ -164,6 +190,17 @@ cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
   "$INSTALLER_SCRIPT_FOLDER/toolset.json"
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
+# packer sets IMAGE_FOLDER=/imagegeneration; configure-system.sh chmods it.
+export IMAGE_FOLDER=/imagegeneration
+# packer passes IMAGEDATA_FILE to configure-image-data.sh.
+export IMAGEDATA_FILE=/imagegeneration/imagedata.json
+mkdir -p /imagegeneration
+
+# packer uploads assets/post-gen to the image folder and renames it to
+# post-generation; configure-system.sh moves it to /opt. Reproduce that here
+# so the mv in configure-system.sh does not fail under set -e.
+cp -R /runner-images/images/ubuntu/assets/post-gen /imagegeneration/post-gen
+mv /imagegeneration/post-gen /imagegeneration/post-generation
 
 cd /runner-images/images/ubuntu/scripts/build
 for script in \
