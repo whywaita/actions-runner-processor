@@ -44,16 +44,17 @@ func Launch(ctx context.Context, r *Runner) error {
 // read-only and all writes land on a private overlay layer that is discarded
 // when the container exits. Networking is shared with the host (no
 // --private-network) so the runner can reach GitHub over outbound HTTPS.
-// The runner runs as root inside the container, which is what makes `sudo`
-// available in job steps.
+// The runner process boots in the container as the `runner` user (--user=runner,
+// matching the GitHub-hosted image layout); the user has passwordless sudo, so
+// `sudo` is available in job steps.
 func launchNspawn(ctx context.Context, r *Runner) error {
 	args := []string{
 		"--quiet",
 		"--directory=" + r.ImagePath,
 		"--volatile=overlay",
 		"--as-pid2",
+		"--user=runner",
 		"--setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=" + r.JITConfig,
-		"--setenv=RUNNER_ALLOW_RUNASROOT=1",
 		"--machine=" + r.Name,
 		"--bind-ro=/etc/resolv.conf",
 		"--bind-ro=/etc/hosts",
@@ -71,8 +72,7 @@ func launchNspawn(ctx context.Context, r *Runner) error {
 	// entrypoint spawns inherits it.
 	cmd.Env = append(cmd.Environ(),
 		"ACTIONS_RUNNER_INPUT_JITCONFIG="+r.JITConfig,
-		"HOME=/root",
-		"RUNNER_ALLOW_RUNASROOT=1",
+		"HOME=/home/runner",
 	)
 
 	var output bytes.Buffer

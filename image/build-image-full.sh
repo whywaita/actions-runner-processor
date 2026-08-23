@@ -150,14 +150,17 @@ echo "man-db man-db/auto-update boolean false" | debconf-set-selections
 apt-get update -y -qq
 apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db apparmor
 
-# Create a dedicated runner user, mirroring GitHub-hosted images. The runner
-# process itself still boots as root in nspawn, but tools provisioned to
-# /home/runner (e.g. the bazelisk download cache) are owned by this user so the
-# image matches the GitHub layout and can later be switched to --user=runner.
-# Passwordless sudo is granted so job steps that call sudo work as expected.
-useradd -m -d /home/runner -s /bin/bash -u 1001 -U runner
-echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
-chmod 440 /etc/sudoers.d/runner
+# Create a dedicated runner user, mirroring GitHub-hosted / actions-runner-images
+# convention (see whywaita/actions-runner-images-lxd lxd.patch): a `runner`
+# user with a known password, added to the sudo group, and passwordless sudo so
+# job steps that call sudo work as expected. The runner process boots as this
+# user (launchNspawn passes --user=runner) while systemd-nspawn itself runs as
+# host root.
+apt-get install -y -qq whois
+runner_pass="$(echo runner | mkpasswd -s -m sha-512)"
+useradd -m -d /home/runner -s /bin/bash -u 1001 -U -p "$runner_pass" runner
+gpasswd -a runner sudo
+echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # install-container-tools.sh generates a podman AppArmor profile and calls
 # apparmor_parser to load it. Loading AppArmor profiles into the host kernel is
@@ -241,6 +244,12 @@ mkdir -p /opt/actions-runner
 curl -sL "https://github.com/actions/runner/releases/download/${VER}/actions-runner-linux-${RUNNER_ARCH}-${TRIM}.tar.gz" \
   | tar xz -C /opt/actions-runner
 chmod +x /opt/actions-runner/run.sh
+# The runner boots as the `runner` user, so the runner install tree must be
+# owned (and writable) by that user: run.sh writes _diag/_work/_temp and the
+# registration state under /opt/actions-runner.
+chown -R runner:runner /opt/actions-runner
+mkdir -p /opt/actions-runner/_diag /opt/actions-runner/_temp /opt/actions-runner/_work
+chown -R runner:runner /opt/actions-runner/_diag /opt/actions-runner/_temp /opt/actions-runner/_work
 
 # Fresh OS inside the container; run every runner-images build script in a
 # stable, conventional order, mirroring what packer does in

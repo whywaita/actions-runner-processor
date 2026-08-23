@@ -198,10 +198,9 @@ systemd-nspawn \
   --directory=/opt/runner/image \                    # custom image (read-only lower)
   --volatile=overlay \                                # ephemeral overlay root (discarded)
   --as-pid2 \                                         # run entrypoint as PID 2
+  --user=runner \                                     # boot runner process as `runner` (sudo available)
   --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=... \
-  --setenv=RUNNER_ALLOW_RUNASROOT=1 \
   --machine="${R_NAME}" \
-  --uid 0 --gid 0 \
   --bind-ro=/etc/resolv.conf \
   --bind-ro=/etc/hosts \
   --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
@@ -213,7 +212,7 @@ systemd-nspawn \
 
 - Custom image lives at `/opt/runner/image` on the host (`runner.image_path`). Built by `image/build-image.sh` (lightweight) or `image/build-image-full.sh` (full).
 - Networking is shared with the host (no `--private-network`) → only outbound HTTPS to reach GitHub.
-- The runner runs as **root** inside the container → `sudo` works in job steps.
+- The runner boots as the `runner` user inside the container (passwordless sudo) → `sudo` works in job steps. systemd-nspawn itself runs as host root.
 - The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.
 - When a runner process exits, its GitHub registration is removed using the runner ID from the JIT response.
 
@@ -441,7 +440,7 @@ The same `maxRunners` / `minRunners` apply across all Installations. Runners onl
 
 | Threat | Countermeasure |
 |--------|---------------|
-| Cross-job access | systemd-nspawn container (PID, IPC, UTS, mount namespace isolation). The runner is root inside the container but in a separate namespace from the host |
+| Cross-job access | systemd-nspawn container (PID, IPC, UTS, mount namespace isolation). The runner is the `runner` user inside the container (passwordless sudo), in a separate namespace from the host |
 | Job mutating host files | Custom image is a read-only lower; writes go to the `--volatile=overlay` ephemeral upper. Discarded on job exit |
 | Runner process lingering | systemd-nspawn container terminated via `Kill()`. The ephemeral overlay is discarded at the same time |
 | Credential leak | GitHub App private key chmod 600 and masked inside the sandbox. JIT Config is one-time use |
@@ -513,7 +512,8 @@ curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/a
 sudo rm -rf /opt/runner/image
 sudo mv /opt/runner/work-rootfs /opt/runner/image
 
-# 3. systemd-nspawn must run as root → dedicated user not needed
+# 3. systemd-nspawn must run as root on the host; the runner inside the image
+#    boots as the dedicated `runner` user
 
 # 4. Install the processor
 cp actions-runner-processor /opt/actions-runner-processor/
