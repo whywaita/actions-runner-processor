@@ -328,9 +328,17 @@ mkdir -p "$WORK/status"
 # Boot the container with real systemd (--boot) so package postinst hooks that
 # call invoke-rc.d/systemctl operate against a running init (with policy-rc.d
 # still short-circuiting service starts during provisioning).
+#
+# snap support: snapd must mount squashfs images, which requires the squashfs
+# kernel module and CAP_SYS_ADMIN (new filesystem mounts). systemd-nspawn
+# strips CAP_SYS_ADMIN by default, so grant it explicitly for the build.
+# Ensure the squashfs module is loaded on the host first.
+modprobe squashfs 2>/dev/null || true
+grep -q squashfs /proc/filesystems || echo "warning: squashfs not available in host kernel"
 systemd-nspawn \
   --directory="$WORK/rootfs" \
   --machine="$MACHINE" \
+  --capability=CAP_SYS_ADMIN \
   --bind="$WORK/provision.sh:/runner-provision.sh" \
   --bind="$WORK/runner-images:/runner-images" \
   --bind="$WORK/status:/provision" \
