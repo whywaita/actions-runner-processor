@@ -108,6 +108,18 @@ trap 'trap - EXIT; [ "$(cat "$STATUS_FILE" 2>/dev/null)" = "OK" ] || poweroff_se
 # curl: (23) (a write failed, almost always disk full).
 df -h / /tmp 2>/dev/null | sed 's/^/DISK /' >&2
 
+# systemd-nspawn mounts /tmp as a small tmpfs (RAM, typically ~1.6G). The
+# runner-images build scripts download large tarballs (Swift ~500MB, clang,
+# dotnet, etc.) into /tmp and this tiny tmpfs fills up, surfacing as
+# "curl: (23) Failure writing output to destination". Unmount the tmpfs so the
+# rootfs's real (145G) disk /tmp is used instead.
+if mountpoint -q /tmp && awk '$2=="/tmp" && $3=="tmpfs" {exit 0} END{exit 1}' /proc/mounts; then
+  echo ">>> /tmp is tmpfs; switching to real disk" >&2
+  umount /tmp || { echo "warning: could not unmount /tmp tmpfs" >&2; }
+fi
+mkdir -p /tmp
+df -h /tmp 2>/dev/null | sed 's/^/DISK(tmp)/' >&2
+
 # Prevent apt package postinst hooks from trying to start system services.
 # We are provisioning a headless nspawn container with no running systemd, so
 # invoke-rc.d would block on dbus/systemd sockets (seen as a silent hang after
