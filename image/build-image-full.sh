@@ -150,6 +150,15 @@ echo "man-db man-db/auto-update boolean false" | debconf-set-selections
 apt-get update -y -qq
 apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db apparmor
 
+# Create a dedicated runner user, mirroring GitHub-hosted images. The runner
+# process itself still boots as root in nspawn, but tools provisioned to
+# /home/runner (e.g. the bazelisk download cache) are owned by this user so the
+# image matches the GitHub layout and can later be switched to --user=runner.
+# Passwordless sudo is granted so job steps that call sudo work as expected.
+useradd -m -d /home/runner -s /bin/bash -u 1001 -U runner
+echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
+chmod 440 /etc/sudoers.d/runner
+
 # install-container-tools.sh generates a podman AppArmor profile and calls
 # apparmor_parser to load it. Loading AppArmor profiles into the host kernel is
 # not possible (nor meaningful) from inside nspawn, and on our runtime hosts
@@ -267,14 +276,16 @@ cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
 # Bazelisk (and other tools) need a cache-dir anchor to locate their download
-# cache. Provisioning runs as root, so point HOME/XDG_CACHE_HOME at /root.
-export HOME=/root
-export XDG_CACHE_HOME=/root/.cache
+# cache. Point them at the runner user's home so tool caches land under
+# /home/runner (GitHub layout); we chown /home/runner to runner after the
+# build loop. Provisioning itself runs as root inside the container.
+export HOME=/home/runner
+export XDG_CACHE_HOME=/home/runner/.cache
 # packer sets IMAGE_FOLDER=/imagegeneration; configure-system.sh chmods it.
 export IMAGE_FOLDER=/imagegeneration
 # packer passes IMAGEDATA_FILE to configure-image-data.sh.
 export IMAGEDATA_FILE=/imagegeneration/imagedata.json
-mkdir -p /imagegeneration /root/.cache
+mkdir -p /imagegeneration /home/runner/.cache
 
 # packer uploads assets/post-gen to the image folder and renames it to
 # post-generation; configure-system.sh moves it to /opt. Reproduce that here
@@ -372,6 +383,11 @@ TRAPEOF
       echo "### (skip) $script not present"
     fi
 done
+
+# The runner-images scripts (running as root) may have written tool caches
+# under /home/runner — hand them back to the runner user so the image matches
+# the GitHub layout where the runner user owns its home directory.
+chown -R runner:runner /home/runner
 
 echo "PROVISION DONE"
 # Power the container off so systemd-nspawn returns on the host; the host reads
