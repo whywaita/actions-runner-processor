@@ -113,7 +113,7 @@ df -h / /tmp 2>/dev/null | sed 's/^/DISK /' >&2
 # dotnet, etc.) into /tmp and this tiny tmpfs fills up, surfacing as
 # "curl: (23) Failure writing output to destination". Unmount the tmpfs so the
 # rootfs's real (145G) disk /tmp is used instead.
-if mountpoint -q /tmp && awk '$2=="/tmp" && $3=="tmpfs" {exit 0} END{exit 1}' /proc/mounts; then
+if mountpoint -q /tmp && awk '$2=="/tmp" && $3=="tmpfs" {found=1; exit} END{exit !found}' /proc/mounts; then
   echo ">>> /tmp is tmpfs; switching to real disk" >&2
   umount /tmp || { echo "warning: could not unmount /tmp tmpfs" >&2; }
 fi
