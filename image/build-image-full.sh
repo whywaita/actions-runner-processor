@@ -266,11 +266,15 @@ cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
   "$INSTALLER_SCRIPT_FOLDER/toolset.json"
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
+# Bazelisk (and other tools) need a cache-dir anchor to locate their download
+# cache. Provisioning runs as root, so point HOME/XDG_CACHE_HOME at /root.
+export HOME=/root
+export XDG_CACHE_HOME=/root/.cache
 # packer sets IMAGE_FOLDER=/imagegeneration; configure-system.sh chmods it.
 export IMAGE_FOLDER=/imagegeneration
 # packer passes IMAGEDATA_FILE to configure-image-data.sh.
 export IMAGEDATA_FILE=/imagegeneration/imagedata.json
-mkdir -p /imagegeneration
+mkdir -p /imagegeneration /root/.cache
 
 # packer uploads assets/post-gen to the image folder and renames it to
 # post-generation; configure-system.sh moves it to /opt. Reproduce that here
