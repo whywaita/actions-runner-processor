@@ -113,7 +113,7 @@ echo "man-db man-db/auto-update boolean false" | debconf-set-selections
 
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db
+apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db apparmor snapd
 
 # configure-environment.sh edits Azure-specific /etc/waagent.conf (swap
 # settings). The nspawn rootfs has no Azure agent, so create an empty config
