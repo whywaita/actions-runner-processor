@@ -1,13 +1,24 @@
 # Custom runner image manifest for actions-runner-processor (nspawn mode).
 #
-# This manifest drives image/build-image.sh. It builds a lightweight root
-# filesystem (rootfs) that systemd-nspawn boots (runner.image_path). The base
-# is debootstrapped and then provisioned inside a chroot: the actions/runner
-# binary plus any extra apt packages you declare are baked in.
+# This manifest drives image/build-image.sh, which builds a lightweight root
+# filesystem (rootfs) that systemd-nspawn boots as runner.image_path (default
+# /opt/runner/image).
 #
-# The resulting rootfs tarball is meant to be expanded to runner.image_path
-# (default /opt/runner/image) on the host, then booted read-only with an
-# ephemeral overlay. Jobs run as root inside the container, so `sudo` works.
+# WHAT THIS IMAGE IS / CONTAINS
+#   - A minimal Debian/Ubuntu base (debootstrap --variant=minbase, so no
+#     systemd as PID1; the container is booted with --as-pid2 in an ephemeral
+#     overlay).
+#   - The official actions/runner binary at /opt/actions-runner (the container
+#     entrypoint /opt/actions-runner/run.sh boots a JIT-configured listener).
+#   - Any apt packages you declare below (build tools, runtime deps), baked in
+#     so jobs don't install them per run.
+#   - A dedicated `runner` user (uid 1001, home /home/runner, passwordless
+#     sudo) mirroring the GitHub-hosted layout. launchNspawn boots the
+#     container with --user=runner, so the runner process and job steps run as
+#     this user and `sudo` works inside jobs.
+#
+# On the host, the rootfs tarball is expanded to runner.image_path and booted
+# read-only with an ephemeral overlay; per-job writes are discarded on exit.
 
 # Base distribution for debootstrap. Must be a Debian/Ubuntu release
 # (e.g. "ubuntu:noble" for Ubuntu 24.04 or "debian:trixie").
@@ -37,5 +48,13 @@ packages:
   - openssh-client
   - python3
   - sqlite3
+  - sudo
   - unzip
   - wget
+  # whois provides mkpasswd, used to bake the runner user's password hash.
+  - whois
+  # ca-certificates: trusted roots so HTTPS to GitHub works out of the box.
+  # The actions/runner's own native .NET deps (libicu, libssl3, libkrb5, zlib,
+  # liblttng-ust) are installed by bin/installdependencies.sh inside the chroot
+  # at build time (see image/build-image.sh), so they are not listed here.
+  - ca-certificates

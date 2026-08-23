@@ -2,48 +2,28 @@ package runner
 
 import (
 	"bytes"
-	"slices"
 	"testing"
 )
 
-func TestBuildArgsUsesBubblewrapTemporaryOverlays(t *testing.T) {
+func TestIsWithin(t *testing.T) {
 	t.Parallel()
 
-	r := &Runner{
-		ActionsRunnerPath: "/srv/actions-runner",
-		WorkDir:           "/srv/workspaces/runner-1234",
-		MaskedPaths:       []string{"/etc/custom/key.pem", "/etc/custom/config.yaml", "/home/hidden-by-sandbox.pem"},
+	tests := []struct {
+		path string
+		root string
+		want bool
+	}{
+		{"/etc/custom/key.pem", "/etc", true},
+		{"/etc/hosts", "/etc", true},
+		{"/home/hidden.pem", "/etc", false},
+		{"/etc/..", "/etc", false},
+		{"/etc2/foo", "/etc", false},
+		{"/opt/runner/foo", "/opt", true},
 	}
-
-	args := buildArgs(r)
-
-	wantSequences := [][]string{
-		{"--overlay-src", "/usr", "--tmp-overlay", "/usr"},
-		{"--overlay-src", "/etc", "--tmp-overlay", "/etc"},
-		{"--overlay-src", "/var", "--tmp-overlay", "/var"},
-		{"--overlay-src", "/srv/actions-runner", "--tmp-overlay", "/actions-runner"},
-		{"--tmpfs", "/run", "--dir", "/run/systemd", "--dir", "/run/systemd/resolve"},
-		{"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"},
-		{"--ro-bind", "/dev/null", "/etc/custom/key.pem"},
-		{"--ro-bind", "/dev/null", "/etc/custom/config.yaml"},
-		{"--bind", "/srv/workspaces/runner-1234", "/actions-runner/_work"},
-		{"--uid", "0", "--gid", "0"},
-	}
-
-	for _, want := range wantSequences {
-		if !containsSequence(args, want) {
-			t.Errorf("buildArgs() = %q, want sequence %q", args, want)
+	for _, tt := range tests {
+		if got := isWithin(tt.path, tt.root); got != tt.want {
+			t.Errorf("isWithin(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
 		}
-	}
-
-	if slices.Contains(args, "fuse-overlayfs") {
-		t.Errorf("buildArgs() = %q, must not use fuse-overlayfs", args)
-	}
-	if slices.Contains(args, "/home/hidden-by-sandbox.pem") {
-		t.Errorf("buildArgs() = %q, must not mount a mask outside /etc", args)
-	}
-	if indexOf(args, "--tmpfs", "/run") > indexOf(args, "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf") {
-		t.Errorf("buildArgs() must create /run before binding /etc/resolv.conf: %q", args)
 	}
 }
 
@@ -56,20 +36,50 @@ func TestOutput(t *testing.T) {
 	}
 }
 
-func containsSequence(values, sequence []string) bool {
-	for i := 0; i+len(sequence) <= len(values); i++ {
-		if slices.Equal(values[i:i+len(sequence)], sequence) {
-			return true
-		}
-	}
-	return false
-}
+func TestNspawnArgs(t *testing.T) {
+	t.Parallel()
 
-func indexOf(values []string, sequence ...string) int {
-	for i := 0; i+len(sequence) <= len(values); i++ {
-		if slices.Equal(values[i:i+len(sequence)], sequence) {
-			return i
+	r := &Runner{
+		Name:        "runner-eaa075e1",
+		JITConfig:   "some-jit-config",
+		ImagePath:   "/opt/runner/image",
+		Entrypoint:  "/opt/actions-runner/run.sh",
+		MaskedPaths: []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
+	}
+	args := nspawnArgs(r)
+
+	want := []string{
+		"--quiet",
+		"--directory=/opt/runner/image",
+		"--volatile=overlay",
+		"--as-pid2",
+		"--user=runner",
+		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
+		"--setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=some-jit-config",
+		"--machine=runner-eaa075e1",
+		"--bind-ro=/etc/resolv.conf",
+		"--bind-ro=/etc/hosts",
+		"--bind-ro=/dev/null:/etc/actions-runner-processor/config.yaml",
+		"/opt/actions-runner/run.sh",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("nspawnArgs() len = %d, want %d\ngot:  %v\nwant: %v", len(args), len(want), args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("nspawnArgs()[%d] = %q, want %q\ngot:  %v\nwant: %v", i, args[i], want[i], args, want)
 		}
 	}
-	return -1
+
+	// The /home/secret.pem masked path is outside /etc and must be skipped,
+	// and the /etc masked path must be a single SRC:DEST token (not two
+	// separate args, which would make nspawn exec the bare path as command).
+	for _, a := range args {
+		if a == "/etc/actions-runner-processor/config.yaml" {
+			t.Errorf("masked /etc path leaked as a bare arg (must be a single --bind-ro=/dev/null:SRC:DEST token): %v", args)
+		}
+		if a == "/home/secret.pem" {
+			t.Errorf("non-/etc path leaked into args: %v", args)
+		}
+	}
 }

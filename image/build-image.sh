@@ -84,12 +84,43 @@ curl -sL "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/
   | tar xz -C "$ROOTFS/opt/actions-runner"
 
 # The runner's official ./run.sh reads ACTIONS_RUNNER_INPUT_JITCONFIG (passed
-# via systemd-nspawn --setenv) and boots the listener. Runner runs as root
-# inside the container, so `sudo` works in job steps.
+# via systemd-nspawn --setenv) and boots the listener.
 chmod +x "$ROOTFS/opt/actions-runner/run.sh"
 
-# Ensure runtime dirs exist so state lands on the ephemeral overlay.
+# actions/runner is .NET-based and needs native system deps (libicu, libssl,
+# libkrb5, zlib, liblttng-ust) at startup. The runner ships the official
+# installdependencies.sh that installs exactly these for the current release;
+# call it inside the chroot so the listener boots and stays correct across
+# runner upgrades.
+echo ">>> install actions/runner native dependencies"
+chroot "$ROOTFS" /bin/bash -c "
+  export DEBIAN_FRONTEND=noninteractive
+  cd /opt/actions-runner
+  if [ -x bin/installdependencies.sh ]; then
+    ./bin/installdependencies.sh
+  else
+    echo 'warning: bin/installdependencies.sh not found; installing fallback set'
+    apt-get install -y -qq libkrb5-3 zlib1g liblttng-ust1t64 libssl3 libicu74
+  fi
+"
+
+# Create a dedicated runner user, mirroring the GitHub-hosted / full-image
+# convention (uid 1001, home /home/runner, passwordless sudo). launchNspawn
+# boots the container with --user=runner, so a `runner` account must exist in
+# the rootfs or systemd-nspawn fails with "Failed to resolve user 'runner'".
+echo ">>> create runner user (uid 1001, passwordless sudo)"
+chroot "$ROOTFS" /bin/bash -c "
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y -qq whois
+  runner_pass=\$(echo runner | mkpasswd -s -m sha-512)
+  useradd -m -d /home/runner -s /bin/bash -u 1001 -U -p \"\$runner_pass\" runner
+  gpasswd -a runner sudo
+  echo 'runner ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+"
+# Ensure runtime dirs exist so state lands on the ephemeral overlay, then hand
+# the runner-owned paths to the runner user.
 mkdir -p "$ROOTFS/opt/actions-runner/_diag" "$ROOTFS/opt/actions-runner/_work"
+chown -R 1001:1001 "$ROOTFS/opt/actions-runner"
 
 echo ">>> finalize /etc/hosts"
 chroot "$ROOTFS" /bin/bash -c "

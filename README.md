@@ -37,7 +37,7 @@ ephemeral runners inside [systemd-nspawn](https://systemd.io/) containers.
 | **Ephemeral Runners** | Each runner lives for exactly one job, then self-destructs. |
 | **JIT Config** | No registration token needed. Runners boot directly from a JIT config. |
 | **Custom Image** | Boot runners from your own root filesystem image (runner + tools). |
-| **sudo works** | The runner runs as root inside the container, so `sudo` is available. |
+| **sudo works** | The runner boots as the `runner` user (GitHub layout) with passwordless sudo, so `sudo` is available in job steps. |
 
 ## Quick Start
 
@@ -61,6 +61,21 @@ apt install systemd-container
   version, and the extra apt packages baked in.
 - `image/build-image.sh` — debootsraps the base, provisions the packages and
   runner in a chroot, and packs the resulting rootfs into a `.tar.gz`.
+
+**What the (lightweight) image is / contains:**
+
+| Component | Where | Notes |
+|---|---|---|
+| Minimal Debian/Ubuntu base | `/` | `debootstrap --variant=minbase`; no systemd as PID1 (booted `--as-pid2` in an ephemeral overlay) |
+| `actions/runner` binary | `/opt/actions-runner` | The container entrypoint `/opt/actions-runner/run.sh` boots a JIT-configured listener |
+| Extra apt packages | `/usr` | `build-essential`, git, curl, jq, python3, `sudo`, etc. — declared in `image.yaml`, baked in so jobs don't install them per run |
+| Dedicated `runner` user | uid 1001, `/home/runner` | Passwordless sudo, mirrors the GitHub-hosted layout |
+
+The image is booted **read-only** with an **ephemeral overlay**: jobs can
+`apt install` and mutate `/usr` freely, but every write lands on a private
+upper layer that is **discarded when the runner exits**, so one job never
+affects another job or the host. Because the container boots as the `runner`
+user with passwordless sudo, `sudo` works inside job steps.
 
 **Build it locally** (needs root for debootstrap/chroot):
 
@@ -121,7 +136,6 @@ github:
 scale_set_name: "actions-runner-processor"
 
 runner:
-  mode: "nspawn"                                   # sandbox backend: "nspawn" (default) or "bwrap"
   image_path: "/opt/runner/image"                  # custom runner image rootfs
   entrypoint: "/opt/actions-runner/run.sh"         # in-container boot command
   max_runners: 4                                   # 0 = runtime.NumCPU()
@@ -159,6 +173,22 @@ when unset.
 | `organization_self_hosted_runners:write` | Issue runner registration tokens |
 
 ### Install
+
+The easiest path is the setup script, which installs the latest release from
+GitHub Releases as a `.deb` (pulls `systemd-container`, the example config, the
+systemd unit), then lets you wire it into systemd:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash
+# or install a specific version:
+curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash -s v0.0.5
+```
+
+Then edit `/etc/actions-runner-processor/config.yaml` (set `github.client_id` /
+`github.private_key_path`), place the GitHub App `.pem`, and:
+`systemctl start actions-runner-processor`.
+
+Manual install (from a binary you built yourself):
 
 ```bash
 # Install binary
@@ -225,7 +255,7 @@ systemd-nspawn \
 - **Custom image** — the image directory is the base (lower) layer.
 - **Ephemeral** — all writes go to a private overlay layer discarded on exit, so jobs can `apt install` and mutate `/usr` without affecting other jobs or the host.
 - **Network** — shares the host network namespace (no `--private-network`), so the runner reaches GitHub over outbound HTTPS only.
-- **sudo** — runs as root inside the container; `sudo` works as expected in job steps.
+- **sudo** — the runner boots as the `runner` user (GitHub layout); passwordless sudo makes `sudo` work as expected in job steps.
 - The configuration file and GitHub App private key are masked with `/dev/null` inside the sandbox.
 - Runner registrations are removed by ID whenever a runner process exits, including startup failures.
 

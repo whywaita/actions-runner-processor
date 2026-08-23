@@ -68,12 +68,6 @@ github:
 	if cfg.Runner.Version != "latest" {
 		t.Errorf("Version: want latest, got %s", cfg.Runner.Version)
 	}
-	if cfg.Runner.ActionsRunnerPath != "/opt/runner/actions-runner" {
-		t.Errorf("ActionsRunnerPath: wrong default")
-	}
-	if cfg.Runner.Mode != "nspawn" {
-		t.Errorf("Mode: want nspawn, got %s", cfg.Runner.Mode)
-	}
 	if cfg.Runner.ImagePath != "/opt/runner/image" {
 		t.Errorf("ImagePath: want /opt/runner/image, got %s", cfg.Runner.ImagePath)
 	}

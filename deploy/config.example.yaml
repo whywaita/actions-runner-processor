@@ -8,14 +8,11 @@ github:
 scale_set_name: "actions-runner-processor"
 
 runner:
-  mode: "nspawn"                   # sandbox backend: "nspawn" (default) or "bwrap" (deprecated)
-  version: "latest"                # actions/runner version (used by bwrap mode)
-  actions_runner_path: "/opt/runner/actions-runner"   # bwrap mode only
-  workspace_root: "/opt/runner/workspaces"            # bwrap mode only
-  # nspawn mode: custom runner image (root filesystem directory). Booted
-  # read-only with an ephemeral overlayed root; changes are discarded on exit.
+  version: "latest"                # actions/runner version (informational)
+  # Custom runner image (root filesystem directory). Booted read-only with an
+  # ephemeral overlayed root; changes are discarded on exit.
   image_path: "/opt/runner/image"
-  # nspawn mode: absolute path (inside the container) of the boot command.
+  # Absolute path (inside the container) of the boot command.
   entrypoint: "/opt/actions-runner/run.sh"
   max_runners: 0                   # 0 = NumCPU
   min_runners: 0

@@ -35,19 +35,12 @@ type GitHubConfig struct {
 
 // RunnerConfig holds runner binary settings.
 type RunnerConfig struct {
-	Version           string `yaml:"version"`
-	ActionsRunnerPath string `yaml:"actions_runner_path"`
-	WorkspaceRoot     string `yaml:"workspace_root"`
-	MaxRunners        int    `yaml:"max_runners"`
-	MinRunners        int    `yaml:"min_runners"`
+	Version    string `yaml:"version"`
+	MaxRunners int    `yaml:"max_runners"`
+	MinRunners int    `yaml:"min_runners"`
 
-	// Sandbox backend for ephemeral runners. "nspawn" (default) boots each
-	// runner in a systemd-nspawn container from ImagePath with an ephemeral
-	// overlayed root (changes discarded on exit). "bwrap" uses bubblewrap on
-	// the host (deprecated).
-	Mode string `yaml:"mode"`
 	// ImagePath is the root filesystem directory used as the custom runner
-	// image for nspawn mode (e.g. a distrobuilder / debootstrap rootfs with
+	// image for nspawn mode (a debootstrap / custom-built rootfs with
 	// actions/runner preinstalled).
 	ImagePath string `yaml:"image_path"`
 	// Entrypoint is the absolute path (inside the container) of the command
@@ -108,16 +101,8 @@ func Load() (*Config, error) {
 	if cfg.Runner.Version == "" {
 		cfg.Runner.Version = "latest"
 	}
-	if cfg.Runner.ActionsRunnerPath == "" {
-		cfg.Runner.ActionsRunnerPath = "/opt/runner/actions-runner"
-	}
-	if cfg.Runner.WorkspaceRoot == "" {
-		cfg.Runner.WorkspaceRoot = "/opt/runner/workspaces"
-	}
-	// Sandbox backend. Default to nspawn.
-	if cfg.Runner.Mode == "" {
-		cfg.Runner.Mode = "nspawn"
-	}
+	// The runner boots from a custom image (nspawn); provide a conventional
+	// default path reachable from the deploy layout.
 	if cfg.Runner.ImagePath == "" {
 		cfg.Runner.ImagePath = "/opt/runner/image"
 	}

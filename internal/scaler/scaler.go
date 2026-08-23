@@ -1,14 +1,11 @@
 // Package scaler implements the listener.Scaler interface for launching
-// ephemeral runners in isolated sandboxes (systemd-nspawn by default,
-// bubblewrap as a deprecated fallback).
+// ephemeral runners in a systemd-nspawn container.
 package scaler
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -24,19 +21,14 @@ type scaleSetClient interface {
 
 type launchRunnerFunc func(context.Context, *runner.Runner) error
 
-// BwrapScaler manages runner lifecycle: launch, track, cleanup.
-type BwrapScaler struct {
-	client            scaleSetClient
-	scaleSetID        int
-	maxRunners        int
-	minRunners        int
-	actionsRunnerPath string
-	workspaceRoot     string
-	maskedPaths       []string
+// Scaler manages runner lifecycle: launch, track, cleanup.
+type Scaler struct {
+	client      scaleSetClient
+	scaleSetID  int
+	maxRunners  int
+	minRunners  int
+	maskedPaths []string
 
-	// mode/imagePath/entrypoint drive the sandbox backend (nspawn default,
-	// bwrap deprecated).
-	mode       string
 	imagePath  string
 	entrypoint string
 
@@ -48,27 +40,24 @@ type BwrapScaler struct {
 	logger       *slog.Logger
 }
 
-// New creates a new BwrapScaler.
-func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, actionsRunnerPath, workspaceRoot string, maskedPaths []string, mode, imagePath, entrypoint string) *BwrapScaler {
-	return &BwrapScaler{
-		client:            client,
-		scaleSetID:        scaleSetID,
-		maxRunners:        maxRunners,
-		minRunners:        minRunners,
-		actionsRunnerPath: actionsRunnerPath,
-		workspaceRoot:     workspaceRoot,
-		maskedPaths:       maskedPaths,
-		mode:              mode,
-		imagePath:         imagePath,
-		entrypoint:        entrypoint,
-		launch:            runner.Launch,
-		runners:           make(map[string]*runner.Runner),
-		logger:            slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
+// New creates a new Scaler.
+func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPaths []string, imagePath, entrypoint string) *Scaler {
+	return &Scaler{
+		client:      client,
+		scaleSetID:  scaleSetID,
+		maxRunners:  maxRunners,
+		minRunners:  minRunners,
+		maskedPaths: maskedPaths,
+		imagePath:   imagePath,
+		entrypoint:  entrypoint,
+		launch:      runner.Launch,
+		runners:     make(map[string]*runner.Runner),
+		logger:      slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
 	}
 }
 
 // HandleJobStarted tracks a job that has started on a runner.
-func (s *BwrapScaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
+func (s *Scaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -80,7 +69,7 @@ func (s *BwrapScaler) HandleJobStarted(_ context.Context, job *scaleset.JobStart
 }
 
 // HandleJobCompleted cleans up after a completed job.
-func (s *BwrapScaler) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
+func (s *Scaler) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
 	s.logger.Info("job completed",
 		slog.Int64("runnerRequestID", job.RunnerRequestID),
 		slog.String("runnerName", job.RunnerName),
@@ -90,7 +79,7 @@ func (s *BwrapScaler) HandleJobCompleted(_ context.Context, job *scaleset.JobCom
 }
 
 // HandleDesiredRunnerCount adjusts the number of runners.
-func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -116,33 +105,28 @@ func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (
 }
 
 // Shutdown gracefully stops all runners.
-func (s *BwrapScaler) Shutdown(_ context.Context) {
+func (s *Scaler) Shutdown(_ context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.logger.Info("shutting down", slog.Int("runners", len(s.runners)))
-	for name, r := range s.runners {
+	for _, r := range s.runners {
 		_ = r.Kill()
-		// In bwrap mode the workspace is a host dir we created; in nspawn mode
-		// the ephemeral overlay is cleaned up by systemd-nspawn on exit.
-		if s.mode == "bwrap" {
-			_ = os.RemoveAll(filepath.Join(s.workspaceRoot, name))
-		}
 	}
 	clear(s.runners)
 }
 
 // MaxRunners returns the configured maximum.
-func (s *BwrapScaler) MaxRunners() int { return s.maxRunners }
+func (s *Scaler) MaxRunners() int { return s.maxRunners }
 
 // ActiveRunners returns the current number of tracked runners.
-func (s *BwrapScaler) ActiveRunners() int {
+func (s *Scaler) ActiveRunners() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.runners)
 }
 
-func (s *BwrapScaler) startRunner(ctx context.Context) error {
+func (s *Scaler) startRunner(ctx context.Context) error {
 	name := fmt.Sprintf("runner-%s", uuid.NewString()[:8])
 
 	jit, err := s.client.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{
@@ -156,38 +140,21 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 	}
 	runnerID := int64(jit.Runner.ID)
 
-	// nspawn mode boots the runner from the custom image; the runner's
-	// workspace lives inside the ephemeral overlay, so no host scratch dir.
-	// bwrap mode needs a host workspace dir bound into the sandbox.
-	var workspaceDir string
-	if s.mode == "bwrap" {
-		workspaceDir = filepath.Join(s.workspaceRoot, name)
-		if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
-			return fmt.Errorf("mkdir workspace: %w", err)
-		}
-	}
-
 	r := &runner.Runner{
-		Name:              name,
-		JITConfig:         jit.EncodedJITConfig,
-		ActionsRunnerPath: s.actionsRunnerPath,
-		WorkDir:           workspaceDir,
-		MaskedPaths:       s.maskedPaths,
-		Mode:              s.mode,
-		ImagePath:         s.imagePath,
-		Entrypoint:        s.entrypoint,
+		Name:        name,
+		JITConfig:   jit.EncodedJITConfig,
+		MaskedPaths: s.maskedPaths,
+		ImagePath:   s.imagePath,
+		Entrypoint:  s.entrypoint,
 	}
 
 	if err := s.launch(ctx, r); err != nil {
-		if s.mode == "bwrap" {
-			_ = os.RemoveAll(workspaceDir)
-		}
 		s.removeRunnerRegistration(ctx, runnerID, name)
 		return fmt.Errorf("launch runner: %w", err)
 	}
 
 	s.runners[name] = r
-	s.logger.Info("runner started", slog.String("name", name), slog.String("mode", s.mode))
+	s.logger.Info("runner started", slog.String("name", name))
 
 	// Monitor the runner process. If it exits without completing a job
 	// (crash, OOM, JIT expiry, etc.), remove it from the tracked set so
@@ -212,15 +179,12 @@ func (s *BwrapScaler) startRunner(ctx context.Context) error {
 		delete(s.runners, name)
 		s.mu.Unlock()
 
-		if s.mode == "bwrap" {
-			_ = os.RemoveAll(workspaceDir)
-		}
 		s.removeRunnerRegistration(ctx, runnerID, name)
 	}()
 	return nil
 }
 
-func (s *BwrapScaler) removeRunnerRegistration(ctx context.Context, runnerID int64, name string) {
+func (s *Scaler) removeRunnerRegistration(ctx context.Context, runnerID int64, name string) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 

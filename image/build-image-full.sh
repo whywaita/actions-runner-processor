@@ -78,19 +78,47 @@ export DEBIAN_FRONTEND=noninteractive
 # Write the final status to the bind-mounted /provision/status so the host
 # can tell success from failure after the container powers itself off.
 STATUS_FILE=/provision/status
+poweroff_self() {
+  # Ensure the container always powers itself off so systemd-nspawn on the host
+  # returns and the CI job fails promptly instead of hanging until timeout.
+  sync
+  systemctl poweroff 2>/dev/null || true
+}
 on_fail() {
   echo ">>> PROVISION FAILED at line $LINENO: $BASH_COMMAND" >&2
   echo "FAILED:$LINENO" > "$STATUS_FILE" 2>/dev/null || true
-  sync
-  systemctl poweroff
+  poweroff_self
 }
 finish_ok() {
   echo "PROVISION DONE" >&2
   echo "OK" > "$STATUS_FILE" 2>/dev/null || true
-  sync
-  systemctl poweroff
+  poweroff_self
 }
+# Whatever path this script exits by (command failure, child-script failure, a
+# stray 'exit', or a signal), make sure the container powers off so the host
+# nspawn call returns and the job does not run until timeout. We only power off
+# on exit when provisioning did not already complete OK (finish_ok calls
+# poweroff itself and then exits, so this is idempotent).
 trap 'on_fail' ERR
+trap 'trap - EXIT; [ "$(cat "$STATUS_FILE" 2>/dev/null)" = "OK" ] || poweroff_self' EXIT
+
+# Print filesystem usage before each build script so we can catch disk
+# exhaustion (ENOSPC). GitHub-hosted runners have ~14GB; full toolchains are
+# tight, so knowing the budget is essential when a download starts failing with
+# curl: (23) (a write failed, almost always disk full).
+df -h / /tmp 2>/dev/null | sed 's/^/DISK /' >&2
+
+# systemd-nspawn mounts /tmp as a small tmpfs (RAM, typically ~1.6G). The
+# runner-images build scripts download large tarballs (Swift ~500MB, clang,
+# dotnet, etc.) into /tmp and this tiny tmpfs fills up, surfacing as
+# "curl: (23) Failure writing output to destination". Unmount the tmpfs so the
+# rootfs's real (145G) disk /tmp is used instead.
+if mountpoint -q /tmp && awk '$2=="/tmp" && $3=="tmpfs" {found=1; exit} END{exit !found}' /proc/mounts; then
+  echo ">>> /tmp is tmpfs; switching to real disk" >&2
+  umount /tmp || { echo "warning: could not unmount /tmp tmpfs" >&2; }
+fi
+mkdir -p /tmp
+df -h /tmp 2>/dev/null | sed 's/^/DISK(tmp)/' >&2
 
 # Prevent apt package postinst hooks from trying to start system services.
 # We are provisioning a headless nspawn container with no running systemd, so
@@ -99,9 +127,81 @@ trap 'on_fail' ERR
 printf '#!/bin/sh\n# policy-rc.d: never start services during provisioning\nexit 101\n' > /usr/sbin/policy-rc.d
 chmod +x /usr/sbin/policy-rc.d
 
+# Make apt non-interactive for the whole build: several runner-images scripts
+# call apt-get without -y, and with stdin closed that would abort on the
+# "[Y/n] continue?" prompt. Force --assume-yes and quiet log level globally.
+printf 'APT::Get::Assume-Yes "true";\nAPT::Get::Quiet "1";\n' > /etc/apt/apt.conf.d/90assumeyes
+
+# install-container-tools.sh generates a podman AppArmor profile and calls
+# apparmor_parser to load it when unprivileged userns are restricted. The
+# kernel param cannot be changed from inside the container (it reflects the
+# host), so rather than toggling it we provide apparmor_parser itself.
+# sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 ... (rejected:
+# read-only in nspawn)
+
+# Pin the debconf frontend to noninteractive so dpkg-reconfigure calls in
+# runner-images scripts (e.g. configure-environment.sh reconfigures man-db)
+# never block on an interactive prompt, and pre-seed the man-db answer so
+# dpkg-reconfigure man-db succeeds without input.
+export DEBIAN_FRONTEND=noninteractive
+echo "man-db man-db/auto-update boolean false" | debconf-set-selections
+
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
-apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential
+apt-get install -y -qq sudo systemd systemd-sysv dbus git curl jq ca-certificates locales wget lsb-release software-properties-common gnupg apt-transport-https build-essential cloud-init needrestart man-db apparmor
+
+# Create a dedicated runner user, mirroring GitHub-hosted / actions-runner-images
+# convention (see whywaita/actions-runner-images-lxd lxd.patch): a `runner`
+# user with a known password, added to the sudo group, and passwordless sudo so
+# job steps that call sudo work as expected. The runner process boots as this
+# user (launchNspawn passes --user=runner) while systemd-nspawn itself runs as
+# host root.
+apt-get install -y -qq whois
+runner_pass="$(echo runner | mkpasswd -s -m sha-512)"
+useradd -m -d /home/runner -s /bin/bash -u 1001 -U -p "$runner_pass" runner
+gpasswd -a runner sudo
+echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# install-container-tools.sh generates a podman AppArmor profile and calls
+# apparmor_parser to load it. Loading AppArmor profiles into the host kernel is
+# not possible (nor meaningful) from inside nspawn, and on our runtime hosts
+# unprivileged userns are not restricted anyway, so the profile is unneeded.
+# Provide apparmor_parser (PATH-first wrapper) that tolerates kernel-load
+# failure so the install script proceeds; this matches how the profile is only
+# required on hosts that restrict unprivileged userns, which we do not.
+cat > /usr/local/bin/apparmor_parser <<'WAPP'
+#!/bin/bash
+# Runner-image build within nspawn: AppArmor profiles are loaded by the host
+# kernel and cannot be applied from inside the container. On our hosts
+# unprivileged userns are unrestricted, so skipping is safe. Real parsing still
+# validates the syntax; a load failure is tolerated.
+real_parser=""
+for p in /sbin/apparmor_parser /usr/sbin/apparmor_parser; do
+  [ -x "$p" ] && real_parser="$p" && break
+done
+if [ -n "$real_parser" ]; then
+  # Do NOT let the real parser's non-zero exit trip -E / the ERR trap that this
+  # wrapper itself inherits from the provisioner. Suffix with || true so the
+  # wrapper always returns success regardless of profile-load result.
+  "$real_parser" "$@" || {
+    echo "note: apparmor_parser rc=$? (profile load skipped in nspawn)" >&2
+    true
+  }
+  exit 0
+fi
+exit 0
+WAPP
+chmod +x /usr/local/bin/apparmor_parser
+
+# configure-environment.sh edits Azure-specific /etc/waagent.conf (swap
+# settings). The nspawn rootfs has no Azure agent, so create an empty config
+# for the sed -i edits to succeed as a no-op.
+touch /etc/waagent.conf
+
+# configure-environment.sh disables motd news metadata
+# (sed ENABLED=1 -> ENABLED=0 on /etc/default/motd-news). update-motd is not
+# installed, so create an empty file for the sed -i to succeed as a no-op.
+touch /etc/default/motd-news
 
 # GitHub-hosted Ubuntu 24.04 (noble) images manage apt sources through the
 # deb822 file /etc/apt/sources.list.d/ubuntu.sources; debootstrap's minbase
@@ -144,6 +244,12 @@ mkdir -p /opt/actions-runner
 curl -sL "https://github.com/actions/runner/releases/download/${VER}/actions-runner-linux-${RUNNER_ARCH}-${TRIM}.tar.gz" \
   | tar xz -C /opt/actions-runner
 chmod +x /opt/actions-runner/run.sh
+# The runner boots as the `runner` user, so the runner install tree must be
+# owned (and writable) by that user: run.sh writes _diag/_work/_temp and the
+# registration state under /opt/actions-runner.
+chown -R runner:runner /opt/actions-runner
+mkdir -p /opt/actions-runner/_diag /opt/actions-runner/_temp /opt/actions-runner/_work
+chown -R runner:runner /opt/actions-runner/_diag /opt/actions-runner/_temp /opt/actions-runner/_work
 
 # Fresh OS inside the container; run every runner-images build script in a
 # stable, conventional order, mirroring what packer does in
@@ -156,14 +262,45 @@ chmod +x /opt/actions-runner/run.sh
 export INSTALLER_SCRIPT_FOLDER=/opt/runner-images-scripts
 mkdir -p "$INSTALLER_SCRIPT_FOLDER"
 cp -R /runner-images/images/ubuntu/scripts/build/* "$INSTALLER_SCRIPT_FOLDER/"
+# packer sets both HELPER_SCRIPTS and HELPER_SCRIPT_FOLDER to the helper dir:
+# some scripts (configure-environment.sh) read HELPER_SCRIPTS, others
+# (configure-system.sh) read HELPER_SCRIPT_FOLDER.
 export HELPER_SCRIPTS="$INSTALLER_SCRIPT_FOLDER/helpers"
+export HELPER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER/helpers"
 mkdir -p "$HELPER_SCRIPTS"
 cp -R /runner-images/images/ubuntu/scripts/helpers/* "$HELPER_SCRIPTS/"
+# Disable the Pester test harness: install-* scripts call invoke_tests (which
+# runs PowerShell Pester tests) at the end. We build the image in a bare nspawn
+# container with no test framework, so these would fail spuriously. Overwrite
+# the helper with a no-op; configure-environment.sh symlinks it to PATH.
+cat > "$HELPER_SCRIPTS/invoke-tests.sh" <<'INVA'
+#!/bin/bash
+# Test skeleton disabled for nspawn builds; image provisioning is the goal.
+exit 0
+INVA
+chmod +x "$HELPER_SCRIPTS/invoke-tests.sh"
 # packer places the per-release toolset at $INSTALLER_SCRIPT_FOLDER/toolset.json.
 cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
   "$INSTALLER_SCRIPT_FOLDER/toolset.json"
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
+# Bazelisk (and other tools) need a cache-dir anchor to locate their download
+# cache. Point them at the runner user's home so tool caches land under
+# /home/runner (GitHub layout); we chown /home/runner to runner after the
+# build loop. Provisioning itself runs as root inside the container.
+export HOME=/home/runner
+export XDG_CACHE_HOME=/home/runner/.cache
+# packer sets IMAGE_FOLDER=/imagegeneration; configure-system.sh chmods it.
+export IMAGE_FOLDER=/imagegeneration
+# packer passes IMAGEDATA_FILE to configure-image-data.sh.
+export IMAGEDATA_FILE=/imagegeneration/imagedata.json
+mkdir -p /imagegeneration /home/runner/.cache
+
+# packer uploads assets/post-gen to the image folder and renames it to
+# post-generation; configure-system.sh moves it to /opt. Reproduce that here
+# so the mv in configure-system.sh does not fail under set -e.
+cp -R /runner-images/images/ubuntu/assets/post-gen /imagegeneration/post-gen
+mv /imagegeneration/post-gen /imagegeneration/post-generation
 
 cd /runner-images/images/ubuntu/scripts/build
 for script in \
@@ -175,7 +312,6 @@ for script in \
   configure-image-data.sh \
   configure-environment.sh \
   configure-system.sh \
-  configure-snap.sh \
   configure-pipx.sh \
   install-apt-vital.sh \
   install-powershell.sh \
@@ -233,13 +369,43 @@ for script in \
   ; do
     if [ -f "$script" ]; then
       echo "### running $script"
+      # Budget disk: apt archives from the previous install script are no
+      # longer needed, and the runner-images scripts don't clean them. Free them
+      # each step so ENOSPC doesn't hit on the next big download.
+      apt-get clean 2>/dev/null || true
+      df -h / 2>/dev/null | awk 'NR==1 || /\/$/' | sed 's/^/[disk] /' >&2
       # Run with bash -e so the script's shebang fail-fast semantics are honoured
       # even when invoked explicitly (plain "bash \$script" strips #! options).
-      bash -e "$script" || { echo "FAILED: $script" >&2; exit 1; }
+      # The parent's trap ERR does NOT propagate into a child shell, so for
+      # line-level diagnostics we launch with -E (errtrace) and inject an ERR
+      # trap via BASH_ENV (read by non-interactive bash at startup), reporting
+      # the failing line/command. We exec the script directly (not source) so
+      # \$0 and function scoping behave exactly as a normal invocation.
+      # This heredoc becomes $WORK/provision.sh and runs inside the container
+      # where $WORK is unset, so use an absolute path under /tmp.
+      export BASH_ENV=/tmp/bash-env-trap.sh
+      cat > "$BASH_ENV" <<'TRAPEOF'
+trap 'echo ">>> FAILED line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
+TRAPEOF
+      bash -eE "$script" || {
+        echo "FAILED: $script" >&2
+        # Systemd-managed services that fail (e.g. dockerd in install-docker.sh)
+        # log their real error to the journal, which is otherwise not captured
+        # in the workflow log. Dump the tail so the root cause is visible.
+        echo "--- journal tail (last 80 lines) ---" >&2
+        journalctl --no-pager -n 80 2>/dev/null | sed 's/^/[journal] /' >&2 || true
+        echo "FAILED:$script" > "$STATUS_FILE" 2>/dev/null || true
+        exit 1
+      }
     else
       echo "### (skip) $script not present"
     fi
 done
+
+# The runner-images scripts (running as root) may have written tool caches
+# under /home/runner — hand them back to the runner user so the image matches
+# the GitHub layout where the runner user owns its home directory.
+chown -R runner:runner /home/runner
 
 echo "PROVISION DONE"
 # Power the container off so systemd-nspawn returns on the host; the host reads
@@ -280,9 +446,17 @@ mkdir -p "$WORK/status"
 # Boot the container with real systemd (--boot) so package postinst hooks that
 # call invoke-rc.d/systemctl operate against a running init (with policy-rc.d
 # still short-circuiting service starts during provisioning).
+#
+# install-docker.sh starts dockerd (and pulls images) during provisioning.
+# dockerd needs CAP_SYS_ADMIN (mount namespaces / storage) and CAP_NET_ADMIN
+# (netfilter/iptables for the bridge network driver), so we add both here. The
+# same capabilities are granted in launchNspawn (runner.go) so jobs can use
+# docker at runtime. (snap/configure-snap.sh is still skipped: snapd
+# additionally needs loop devices for squashfs, which we don't provide.)
 systemd-nspawn \
   --directory="$WORK/rootfs" \
   --machine="$MACHINE" \
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \
   --bind="$WORK/provision.sh:/runner-provision.sh" \
   --bind="$WORK/runner-images:/runner-images" \
   --bind="$WORK/status:/provision" \

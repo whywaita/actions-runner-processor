@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,37 +29,11 @@ func (f *fakeScaleSetClient) RemoveRunner(_ context.Context, runnerID int64) err
 	return nil
 }
 
-func TestHandleJobCompletedWaitsForRunnerToExit(t *testing.T) {
-	t.Parallel()
-
-	workspaceRoot := t.TempDir()
-	runnerName := "runner-test"
-	workspaceDir := filepath.Join(workspaceRoot, runnerName)
-	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	s := New(nil, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil, "bwrap", "", "")
-	s.runners[runnerName] = &runner.Runner{Name: runnerName}
-
-	err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: runnerName})
-	if err != nil {
-		t.Fatalf("HandleJobCompleted() error = %v", err)
-	}
-	if _, err := os.Stat(workspaceDir); err != nil {
-		t.Fatalf("workspace removed before runner exited: %v", err)
-	}
-	if _, ok := s.runners[runnerName]; !ok {
-		t.Fatal("runner removed before process exited")
-	}
-}
-
 func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeScaleSetClient{jitRunnerID: 42}
-	workspaceRoot := t.TempDir()
-	s := New(client, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil, "bwrap", "", "")
+	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 	s.launch = func(context.Context, *runner.Runner) error {
 		return errors.New("launch failed")
 	}
@@ -75,11 +47,37 @@ func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 	}
 }
 
+func TestStartRunnerSetsImageAndEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeScaleSetClient{jitRunnerID: 7}
+	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
+
+	var got *runner.Runner
+	s.launch = func(_ context.Context, r *runner.Runner) error {
+		got = r
+		return nil
+	}
+
+	if err := s.startRunner(context.Background()); err != nil {
+		t.Fatalf("startRunner() error = %v", err)
+	}
+	if got.ImagePath != "/srv/image" {
+		t.Errorf("ImagePath = %q, want /srv/image", got.ImagePath)
+	}
+	if got.Entrypoint != "/opt/actions-runner/run.sh" {
+		t.Errorf("Entrypoint = %q, want /opt/actions-runner/run.sh", got.Entrypoint)
+	}
+	if got.JITConfig != "jit-config" || got.Name == "" {
+		t.Errorf("runner fields not populated: %+v", got)
+	}
+}
+
 func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
-	s := New(nil, 1, 0, 0, "/srv/actions-runner", t.TempDir(), nil, "bwrap", "", "")
+	s := New(nil, 1, 0, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 	s.logger = slog.New(slog.NewJSONHandler(&output, nil))
 
 	for _, count := range []int{0, 0, 1, 1, 0, 1} {
