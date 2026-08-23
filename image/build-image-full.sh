@@ -183,6 +183,12 @@ export IMAGE_VERSION="${RELEASE}"
 export IMAGEDATA_FILE=/imagegeneration/imagedata.json
 mkdir -p /imagegeneration
 
+# packer uploads assets/post-gen to the image folder and renames it to
+# post-generation; configure-system.sh moves it to /opt. Reproduce that here
+# so the mv in configure-system.sh does not fail under set -e.
+cp -R /runner-images/images/ubuntu/assets/post-gen /imagegeneration/post-gen
+mv /imagegeneration/post-gen /imagegeneration/post-generation
+
 cd /runner-images/images/ubuntu/scripts/build
 for script in \
   configure-apt-mock.sh \
