@@ -160,6 +160,22 @@ when unset.
 
 ### Install
 
+The easiest path is the setup script, which installs the latest release from
+GitHub Releases as a `.deb` (pulls `systemd-container`, the example config, the
+systemd unit), then lets you wire it into systemd:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash
+# or install a specific version:
+curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash -s v0.0.5
+```
+
+Then edit `/etc/actions-runner-processor/config.yaml` (set `github.client_id` /
+`github.private_key_path`), place the GitHub App `.pem`, and:
+`systemctl start actions-runner-processor`.
+
+Manual install (from a binary you built yourself):
+
 ```bash
 # Install binary
 cp actions-runner-processor /opt/actions-runner-processor/

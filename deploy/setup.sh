@@ -1,0 +1,85 @@
+#!/bin/sh
+#
+# setup.sh — install actions-runner-processor from a GitHub Release and wire it
+# up as a systemd service.
+#
+# Usage:
+#   sudo bash deploy/setup.sh [VERSION]
+#
+# Without VERSION the latest published release is used. This script:
+#   1. Detects the architecture and downloads the matching .deb from
+#      the GitHub Release (actions-runner-processor_<ver>_<arch>.deb).
+#   2. Installs it with apt (pulls in systemd-container + config + unit file).
+#   3. Creates /etc/actions-runner-processor/config.yaml from the packaged
+#      example if none exists yet.
+#   4. Masks nothing; enables and starts the actions-runner-processor service.
+#
+# Configuration (GitHub App ID + private key path) must be filled in at
+# /etc/actions-runner-processor/config.yaml before the service can register.
+
+set -eu
+
+REPO="whywaita/actions-runner-processor"
+VERSION="${1:-}"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "error: run as root (installs packages and systemd units): sudo bash $0" >&2
+  exit 1
+fi
+
+# --- Resolve version (latest release if unspecified) -------------------------
+if [ -z "$VERSION" ]; then
+  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    | grep -oP '"tag_name":\s*"\K[^"]+')"
+  echo ">>> latest release: $VERSION"
+else
+  case "$VERSION" in
+    v*) : ;; *) VERSION="v${VERSION}" ;; esac
+fi
+
+# --- Architecture -------------------------------------------------------------
+case "$(uname -m)" in
+  x86_64)  ARCH="amd64" ;;
+  aarch64) ARCH="arm64" ;;
+  *) echo "error: unsupported arch $(uname -m)" >&2; exit 1 ;;
+esac
+
+# --- Download + install .deb ---------------------------------------------------
+DEB="actions-runner-processor_${VERSION#v}_${ARCH}.deb"
+URL="https://github.com/${REPO}/releases/download/${VERSION}/${DEB}"
+echo ">>> downloading ${URL}"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+curl -fL "${URL}" -o "${TMPDIR}/${DEB}"
+
+echo ">>> installing ${DEB} (pulls systemd-container as a dependency)"
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${TMPDIR}/${DEB}"
+
+# --- Config ---------------------------------------------------------------------
+# The .deb package (nfpm) installs an example config at
+# /etc/actions-runner-processor/config.yaml (noreplace), which the operator
+# edits with their GitHub App credentials.
+CONF="/etc/actions-runner-processor/config.yaml"
+chmod 600 "$CONF" 2>/dev/null || true
+
+# --- Install a runner image if missing ----------------------------------------
+if [ ! -d /opt/runner/image ] || [ -z "$(ls -A /opt/runner/image 2>/dev/null)" ]; then
+  echo ">>> /opt/runner/image is empty — the processor cannot boot runners until"
+  echo "    you build a custom image. See DESIGN.md §7 (image/build-image.sh)."
+fi
+
+# --- Systemd unit ----------------------------------------------------------------
+systemctl daemon-reload
+systemctl enable actions-runner-processor.service
+echo
+echo "Done. Next steps:"
+echo "  1. Edit ${CONF}"
+echo "       github.client_id        = your GitHub App ID"
+echo "       github.private_key_path = path to the App's .pem key"
+echo "  2. Place the .pem key there, e.g."
+echo "       mkdir -p /etc/actions-runner-processor"
+echo "       install -m 600 /path/github-app.pem /etc/actions-runner-processor/github-app.pem"
+echo "  3. Start the service:"
+echo "       systemctl start actions-runner-processor"
+echo "  4. Check it: systemctl status actions-runner-processor"
