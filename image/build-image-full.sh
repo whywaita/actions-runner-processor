@@ -168,13 +168,13 @@ for p in /sbin/apparmor_parser /usr/sbin/apparmor_parser; do
   [ -x "$p" ] && real_parser="$p" && break
 done
 if [ -n "$real_parser" ]; then
-  "$real_parser" "$@"
-  rc=$?
-  # tolerate profile-load failures (kernel/sandbox restrictions)
-  if [ "$rc" -ne 0 ]; then
-    echo "note: apparmor_parser rc=$rc (profile load skipped in nspawn)" >&2
-    exit 0
-  fi
+  # Do NOT let the real parser's non-zero exit trip -E / the ERR trap that this
+  # wrapper itself inherits from the provisioner. Suffix with || true so the
+  # wrapper always returns success regardless of profile-load result.
+  "$real_parser" "$@" || {
+    echo "note: apparmor_parser rc=$? (profile load skipped in nspawn)" >&2
+    true
+  }
   exit 0
 fi
 exit 0
