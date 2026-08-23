@@ -102,6 +102,12 @@ finish_ok() {
 trap 'on_fail' ERR
 trap 'trap - EXIT; [ "$(cat "$STATUS_FILE" 2>/dev/null)" = "OK" ] || poweroff_self' EXIT
 
+# Print filesystem usage before each build script so we can catch disk
+# exhaustion (ENOSPC). GitHub-hosted runners have ~14GB; full toolchains are
+# tight, so knowing the budget is essential when a download starts failing with
+# curl: (23) (a write failed, almost always disk full).
+df -h / /tmp 2>/dev/null | sed 's/^/DISK /' >&2
+
 # Prevent apt package postinst hooks from trying to start system services.
 # We are provisioning a headless nspawn container with no running systemd, so
 # invoke-rc.d would block on dbus/systemd sockets (seen as a silent hang after
@@ -289,6 +295,11 @@ for script in \
   ; do
     if [ -f "$script" ]; then
       echo "### running $script"
+      # Budget disk: apt archives from the previous install script are no
+      # longer needed, and the runner-images scripts don't clean them. Free them
+      # each step so ENOSPC doesn't hit on the next big download.
+      apt-get clean 2>/dev/null || true
+      df -h / 2>/dev/null | awk 'NR==1 || /\/$/' | sed 's/^/[disk] /' >&2
       # Run with bash -e so the script's shebang fail-fast semantics are honoured
       # even when invoked explicitly (plain "bash \$script" strips #! options).
       # The parent's trap ERR does NOT propagate into a child shell, so for
