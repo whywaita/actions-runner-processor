@@ -46,8 +46,10 @@ func Launch(ctx context.Context, r *Runner) error {
 // --private-network) so the runner can reach GitHub over outbound HTTPS.
 // The runner process boots in the container as the `runner` user (--user=runner,
 // matching the GitHub-hosted image layout); the user has passwordless sudo, so
-// `sudo` is available in job steps. CAP_SYS_ADMIN is granted so dockerd (and
-// thus `docker` in job steps) can run inside the container.
+// `sudo` is available in job steps. CAP_SYS_ADMIN + CAP_NET_ADMIN are granted
+// so dockerd (and thus `docker` in job steps) can run inside the container:
+// CAP_SYS_ADMIN covers storage/mount namespaces, CAP_NET_ADMIN the netfilter
+// (iptables) bridge network driver.
 func launchNspawn(ctx context.Context, r *Runner) error {
 	args := []string{
 		"--quiet",
@@ -55,7 +57,7 @@ func launchNspawn(ctx context.Context, r *Runner) error {
 		"--volatile=overlay",
 		"--as-pid2",
 		"--user=runner",
-		"--capability=CAP_SYS_ADMIN",
+		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
 		"--setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=" + r.JITConfig,
 		"--machine=" + r.Name,
 		"--bind-ro=/etc/resolv.conf",

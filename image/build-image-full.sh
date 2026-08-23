@@ -448,14 +448,15 @@ mkdir -p "$WORK/status"
 # still short-circuiting service starts during provisioning).
 #
 # install-docker.sh starts dockerd (and pulls images) during provisioning.
-# dockerd needs CAP_SYS_ADMIN to set up mount namespaces / storage mounts, so we
-# add it here. The same capability is granted in launchNspawn (runner.go) so
-# jobs can use docker at runtime. (snap/configure-snap.sh is still skipped:
-# snapd additionally needs loop devices for squashfs, which we don't provide.)
+# dockerd needs CAP_SYS_ADMIN (mount namespaces / storage) and CAP_NET_ADMIN
+# (netfilter/iptables for the bridge network driver), so we add both here. The
+# same capabilities are granted in launchNspawn (runner.go) so jobs can use
+# docker at runtime. (snap/configure-snap.sh is still skipped: snapd
+# additionally needs loop devices for squashfs, which we don't provide.)
 systemd-nspawn \
   --directory="$WORK/rootfs" \
   --machine="$MACHINE" \
-  --capability=CAP_SYS_ADMIN \
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \
   --bind="$WORK/provision.sh:/runner-provision.sh" \
   --bind="$WORK/runner-images:/runner-images" \
   --bind="$WORK/status:/provision" \
