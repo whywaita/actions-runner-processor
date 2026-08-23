@@ -97,12 +97,22 @@ curl -sL "https://github.com/actions/runner/releases/download/${VER}/actions-run
 chmod +x /opt/actions-runner/run.sh
 
 # Fresh OS inside the container; run every runner-images build script in a
-# stable, conventional order. Some scripts depend on helper scripts copied to
-# $INSTALLER_SCRIPT_FOLDER; copy the whole build dir there like packer does.
+# stable, conventional order, mirroring what packer does in
+# images/ubuntu/templates/build.ubuntu-*.pkr.hcl:
+#   INSTALLER_SCRIPT_FOLDER <- scripts/build
+#   HELPER_SCRIPTS          <- scripts/helpers
+#   INSTALLER_SCRIPT_FOLDER/toolset.json <- toolsets/toolset-<release>.json
+# Build scripts are run from the runner-images checkout; INSTALLER_SCRIPT_FOLDER
+# is where tools are installed to and where toolset.json is read from.
 export INSTALLER_SCRIPT_FOLDER=/opt/runner-images-scripts
 mkdir -p "$INSTALLER_SCRIPT_FOLDER"
 cp -R /runner-images/images/ubuntu/scripts/build/* "$INSTALLER_SCRIPT_FOLDER/"
-export HELPER_SCRIPTS=/opt/runner-images-scripts
+export HELPER_SCRIPTS="$INSTALLER_SCRIPT_FOLDER/helpers"
+mkdir -p "$HELPER_SCRIPTS"
+cp -R /runner-images/images/ubuntu/scripts/helpers/* "$HELPER_SCRIPTS/"
+# packer places the per-release toolset at $INSTALLER_SCRIPT_FOLDER/toolset.json.
+cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
+  "$INSTALLER_SCRIPT_FOLDER/toolset.json"
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
 
