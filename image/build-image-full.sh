@@ -252,7 +252,7 @@ chmod +x "$WORK/provision.sh"
 # container boot (--boot). The unit powers the machine off when done.
 MKDIR_P="$WORK/rootfs/etc/systemd/system"
 mkdir -p "$MKDIR_P"
-cat > "$MKDIR_P/runner-provision.service" <<'UNIT'
+cat > "$MKDIR_P/runner-provision.service" <<UNIT
 [Unit]
 Description=actions-runner-processor full image provisioning
 After=multi-user.target
@@ -260,6 +260,9 @@ After=multi-user.target
 [Service]
 Type=oneshot
 Environment=DEBIAN_FRONTEND=noninteractive
+Environment=RELEASE=${RELEASE}
+Environment=ARCH=${ARCH}
+Environment=RUNNER_VERSION=${RUNNER_VERSION}
 ExecStart=/runner-provision.sh
 TimeoutStopSec=300
 StandardOutput=journal+console
