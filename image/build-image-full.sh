@@ -272,7 +272,18 @@ for script in \
       echo "### running $script"
       # Run with bash -e so the script's shebang fail-fast semantics are honoured
       # even when invoked explicitly (plain "bash \$script" strips #! options).
-      bash -e "$script" || { echo "FAILED: $script" >&2; exit 1; }
+      # The parent's trap ERR does NOT propagate into a child shell, so for
+      # line-level diagnostics we launch with -E (errtrace) and inject an ERR
+      # trap via BASH_ENV (read by non-interactive bash at startup), reporting
+      # the failing line/command. We exec the script directly (not source) so
+      # \$0 and function scoping behave exactly as a normal invocation.
+      # This heredoc becomes $WORK/provision.sh and runs inside the container
+      # where $WORK is unset, so use an absolute path under /tmp.
+      export BASH_ENV=/tmp/bash-env-trap.sh
+      cat > "$BASH_ENV" <<'TRAPEOF'
+trap 'echo ">>> FAILED line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
+TRAPEOF
+      bash -eE "$script" || { echo "FAILED: $script" >&2; exit 1; }
     else
       echo "### (skip) $script not present"
     fi
