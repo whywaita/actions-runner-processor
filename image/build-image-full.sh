@@ -178,7 +178,11 @@ chmod +x /opt/actions-runner/run.sh
 export INSTALLER_SCRIPT_FOLDER=/opt/runner-images-scripts
 mkdir -p "$INSTALLER_SCRIPT_FOLDER"
 cp -R /runner-images/images/ubuntu/scripts/build/* "$INSTALLER_SCRIPT_FOLDER/"
+# packer sets both HELPER_SCRIPTS and HELPER_SCRIPT_FOLDER to the helper dir:
+# some scripts (configure-environment.sh) read HELPER_SCRIPTS, others
+# (configure-system.sh) read HELPER_SCRIPT_FOLDER.
 export HELPER_SCRIPTS="$INSTALLER_SCRIPT_FOLDER/helpers"
+export HELPER_SCRIPT_FOLDER="$INSTALLER_SCRIPT_FOLDER/helpers"
 mkdir -p "$HELPER_SCRIPTS"
 cp -R /runner-images/images/ubuntu/scripts/helpers/* "$HELPER_SCRIPTS/"
 # packer places the per-release toolset at $INSTALLER_SCRIPT_FOLDER/toolset.json.
@@ -186,6 +190,8 @@ cp "/runner-images/images/ubuntu/toolsets/toolset-${RELEASE//./}.json" \
   "$INSTALLER_SCRIPT_FOLDER/toolset.json"
 export IMAGE_OS=ubuntu
 export IMAGE_VERSION="${RELEASE}"
+# packer sets IMAGE_FOLDER=/imagegeneration; configure-system.sh chmods it.
+export IMAGE_FOLDER=/imagegeneration
 # packer passes IMAGEDATA_FILE to configure-image-data.sh.
 export IMAGEDATA_FILE=/imagegeneration/imagedata.json
 mkdir -p /imagegeneration
