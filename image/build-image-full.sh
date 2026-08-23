@@ -73,6 +73,8 @@ cat > "$WORK/provision.sh" <<'PROVISION'
 #!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# Print the failing line on error so a silent `set -e` exit is diagnosable.
+trap 'echo ">>> PROVISION FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Basic tooling the runner-images scripts assume.
 apt-get update -y -qq
@@ -99,7 +101,7 @@ Components: main restricted universe multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 APTEOF
   rm -f /etc/apt/sources.list
-  apt-get update -y -qq
+  apt-get update -y || { echo ">>> apt-get update failed after writing deb822 sources" >&2; false; }
 fi
 
 # Install the GitHub Actions runner (used as the boot entrypoint).
