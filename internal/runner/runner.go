@@ -156,16 +156,18 @@ func nspawnArgs(r *Runner) []string {
 }
 
 // workspaceBindings maps the host workspace directories (created by
-// prepareWorkspace) to their in-container mount targets under /opt/actions-runner.
-// The github-hosted layout writes toolchain caches to _tool, runner diagnostics
-// to _diag, and job temp scripts to _temp -- all must live on real disk or the
-// RAM-backed overlay fills up with ENOSPC.
+// prepareWorkspace) to their in-container mount targets. The github-hosted
+// layout writes toolchain caches to _tool, runner diagnostics to _diag, job
+// temp scripts to _temp, and the runner user's home cache ($HOME/.cache --
+// where Go/Node/npm/pip put their build caches) to /home/runner/.cache -- all
+// must live on real disk or the RAM-backed overlay fills up with ENOSPC.
 func workspaceBindings(workspaceDir string) map[string]string {
 	return map[string]string{
-		workspaceDir:           "/opt/actions-runner/_work",
-		workspaceDir + "-tool": "/opt/actions-runner/_tool",
-		workspaceDir + "-diag": "/opt/actions-runner/_diag",
-		workspaceDir + "-temp": "/opt/actions-runner/_temp",
+		workspaceDir:            "/opt/actions-runner/_work",
+		workspaceDir + "-tool":  "/opt/actions-runner/_tool",
+		workspaceDir + "-diag":  "/opt/actions-runner/_diag",
+		workspaceDir + "-temp":  "/opt/actions-runner/_temp",
+		workspaceDir + "-cache": "/home/runner/.cache",
 	}
 }
 
