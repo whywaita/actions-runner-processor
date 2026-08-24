@@ -30,12 +30,12 @@ type Runner struct {
 	Entrypoint string // absolute path (in-container) of the boot command
 
 	// WorkspaceDir is the host directory bind-mounted into the container at
-	// /opt/actions-runner/_work (and its _tool sibling). Placing the workspace
-	// and tool cache on real disk is essential: --volatile=overlay puts all
-	// writes inside the container on a RAM-backed tmpfs overlay / toolchain
-	// (Go, Node, ...) extraction fills it up with ENOSPC even when the host
-	// disk has plenty of free space. Empty string disables the bind (falls
-	// back to the overlay).
+	// /opt/actions-runner/_work (and its _tool, _diag, _temp siblings). Placing
+	// the workspace, tool cache, diagnostic logs, and temp scratch on real disk
+	// is essential: --volatile=overlay puts all writes inside the container on a
+	// RAM-backed tmpfs overlay / toolchain extraction (Go, Node, ...) and runner
+	// diagnostics/logs fill it up with ENOSPC even when the host disk has plenty
+	// of free space. Empty string disables the bind (falls back to the overlay).
 	WorkspaceDir string
 
 	cmd    *exec.Cmd
@@ -141,16 +141,32 @@ func nspawnArgs(r *Runner) []string {
 		// treat the bare destination path as the in-container command to run.
 		args = append(args, "--bind-ro=/dev/null:"+path)
 	}
-	// Bind the workspace (and tool cache) onto real host disk. Under
-	// --volatile=overlay every other write lands on the RAM-backed tmpfs
-	// overlay, which the Go/Node toolchain extraction exhausts (ENOSPC). Only
-	// bind when a WorkspaceDir is configured.
+	// Bind the workspace, tool cache, diagnostic dir, and temp scratch onto
+	// real host disk. Under --volatile=overlay every other write lands on the
+	// RAM-backed tmpfs overlay, which the Go/Node toolchain extraction AND
+	// runner diagnostic logs exhaust (ENOSPC). Only bind when a WorkspaceDir is
+	// configured.
 	if r.WorkspaceDir != "" {
-		args = append(args, "--bind", r.WorkspaceDir+":/opt/actions-runner/_work")
-		args = append(args, "--bind", r.WorkspaceDir+"-tool:/opt/actions-runner/_tool")
+		for hostDir, containerDir := range workspaceBindings(r.WorkspaceDir) {
+			args = append(args, "--bind", hostDir+":"+containerDir)
+		}
 	}
 	args = append(args, r.Entrypoint)
 	return args
+}
+
+// workspaceBindings maps the host workspace directories (created by
+// prepareWorkspace) to their in-container mount targets under /opt/actions-runner.
+// The github-hosted layout writes toolchain caches to _tool, runner diagnostics
+// to _diag, and job temp scripts to _temp -- all must live on real disk or the
+// RAM-backed overlay fills up with ENOSPC.
+func workspaceBindings(workspaceDir string) map[string]string {
+	return map[string]string{
+		workspaceDir:           "/opt/actions-runner/_work",
+		workspaceDir + "-tool": "/opt/actions-runner/_tool",
+		workspaceDir + "-diag": "/opt/actions-runner/_diag",
+		workspaceDir + "-temp": "/opt/actions-runner/_temp",
+	}
 }
 
 func isWithin(path, root string) bool {
@@ -158,15 +174,14 @@ func isWithin(path, root string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-// prepareWorkspace creates the host workspace and tool-cache directories that
-// are bind-mounted into the container at /opt/actions-runner/_work and
-// /opt/actions-runner/_tool, and chowns them to the container's `runner` user
-// (uid 1001). The container runner writes job workspaces and toolchain caches
-// into these dirs, which must therefore exist and be runner-owned before the
-// container boots.
+// prepareWorkspace creates the host workspace, tool-cache, diagnostic, and
+// temp-scratch directories that are bind-mounted into the container at
+// /opt/actions-runner/_work, _tool, _diag, and _temp, and chowns them to the
+// container's `runner` user (uid 1001). The container runner writes job
+// workspaces, toolchain caches, diagnostics, and temp scripts into these dirs,
+// which must therefore exist and be runner-owned before the container boots.
 func prepareWorkspace(workspaceDir string) error {
-	dirs := []string{workspaceDir, workspaceDir + "-tool"}
-	for _, dir := range dirs {
+	for dir := range workspaceBindings(workspaceDir) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}

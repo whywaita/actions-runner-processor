@@ -96,7 +96,10 @@ func TestNspawnArgs(t *testing.T) {
 	}
 	args := nspawnArgs(r)
 
-	want := []string{
+	// Prefix args (before the workspace binds) are order-sensitive; verify them
+	// positionally, then check the workspace binds as an unordered set because
+	// they come from a map.
+	wantPrefix := []string{
 		"--quiet",
 		"--directory=/opt/runner/image",
 		"--volatile=overlay",
@@ -108,24 +111,50 @@ func TestNspawnArgs(t *testing.T) {
 		"--bind-ro=/etc/resolv.conf",
 		"--bind-ro=/etc/hosts",
 		"--bind-ro=/dev/null:/etc/actions-runner-processor/config.yaml",
-		"--bind",
-		"/opt/runner/workspaces/runner-eaa075e1:/opt/actions-runner/_work",
-		"--bind",
-		"/opt/runner/workspaces/runner-eaa075e1-tool:/opt/actions-runner/_tool",
-		"/opt/actions-runner/run.sh",
 	}
-	if len(args) != len(want) {
-		t.Fatalf("nspawnArgs() len = %d, want %d\ngot:  %v\nwant: %v", len(args), len(want), args, want)
-	}
-	for i := range want {
-		if args[i] != want[i] {
-			t.Errorf("nspawnArgs()[%d] = %q, want %q\ngot:  %v\nwant: %v", i, args[i], want[i], args, want)
+	for i := range wantPrefix {
+		if args[i] != wantPrefix[i] {
+			t.Fatalf("nspawnArgs() prefix[%d] = %q, want %q\ngot:  %v", i, args[i], wantPrefix[i], args)
 		}
 	}
 
-	// The /home/secret.pem masked path is outside /etc and must be skipped,
-	// and the /etc masked path must be a single SRC:DEST token (not two
-	// separate args, which would make nspawn exec the bare path as command).
+	wantBinds := []string{
+		"/opt/runner/workspaces/runner-eaa075e1:/opt/actions-runner/_work",
+		"/opt/runner/workspaces/runner-eaa075e1-tool:/opt/actions-runner/_tool",
+		"/opt/runner/workspaces/runner-eaa075e1-diag:/opt/actions-runner/_diag",
+		"/opt/runner/workspaces/runner-eaa075e1-temp:/opt/actions-runner/_temp",
+	}
+	gotBinds := make([]string, 0)
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--bind" {
+			gotBinds = append(gotBinds, args[i+1])
+			i++
+		}
+	}
+	if len(gotBinds) != len(wantBinds) {
+		t.Fatalf("got %d workspace binds: %v, want %d: %v", len(gotBinds), gotBinds, len(wantBinds), wantBinds)
+	}
+	for _, wb := range wantBinds {
+		found := false
+		for _, gb := range gotBinds {
+			if gb == wb {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing workspace bind %q in %v", wb, gotBinds)
+		}
+	}
+
+	// Entrypoint must remain the last arg.
+	if args[len(args)-1] != "/opt/actions-runner/run.sh" {
+		t.Fatalf("entrypoint must remain the last arg, got: %v", args)
+	}
+
+	// The /home/secret.pem masked path is outside /etc and must be skipped, and
+	// the /etc masked path must be a single SRC:DEST token (not two separate
+	// args, which would make nspawn exec the bare path as command).
 	for _, a := range args {
 		if a == "/etc/actions-runner-processor/config.yaml" {
 			t.Errorf("masked /etc path leaked as a bare arg (must be a single --bind-ro=/dev/null:SRC:DEST token): %v", args)
@@ -168,7 +197,7 @@ func TestPrepareWorkspace(t *testing.T) {
 		t.Fatalf("prepareWorkspace() error = %v", err)
 	}
 
-	for _, dir := range []string{workspaceDir, workspaceDir + "-tool"} {
+	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp"} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("stat %s: %v", dir, err)
