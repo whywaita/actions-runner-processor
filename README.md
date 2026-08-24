@@ -167,10 +167,45 @@ when unset.
 
 ### GitHub App Permissions
 
-| Permission | Reason |
-|-----------|--------|
-| `administration:read` | Read installation info, manage runner groups/scale sets |
-| `organization_self_hosted_runners:write` | Issue runner registration tokens |
+This app uses the same runner-scale-set + JIT model as ARC. The GitHub App
+permissions needed depend on the **scope** the listener resolves for an
+installation (the listener keys off the *URL path*, not the account type):
+
+- **Organization / org-scoped** (`https://github.com/<org>`) — scale set for the
+  whole org:
+
+  | Permission | Access | Reason |
+  |-----------|--------|--------|
+  | `administration` | **Read** | Read installation info; create / read runner scale sets (`_apis/runtime/runnerscalesets`) |
+  | `organization_self_hosted_runners` | **Write** | Generate JIT runner configs (`.../generatejitconfig`), acquire job messages (`.../sessions`), remove runner registrations |
+  | `metadata` | Read | Standard minimum App permission (installations / repositories discovery) — usually present by default |
+
+- **Repository-scoped** (`https://github.com/<user>/<repo>`, e.g. a personal
+  account like `whywaita/sandbox`) — a per-repo runner:
+
+  | Permission | Access | Reason |
+  |-----------|--------|--------|
+  | `administration` | **Write** | Manage the repo's self-hosted runners (runner-scale-set registrations for the repo) |
+  | `metadata` | Read | Repositories discovery — present by default |
+
+The listener auto-detects installations by account type (`Account.Type`):
+- **User / personal** installations are expanded to **per-repository scopes**
+  (`https://github.com/<user>/<repo>`), so each repo is served by its own
+  repo-scoped runner → needs `administration: write`.
+- **Organization** installations use the **org scope**
+  (`https://github.com/<org>`) → needs `organization_self_hosted_runners: write`.
+
+Note: unlike the legacy registration-token model, this app uses **JIT config**
+(`generatejitconfig`), so no `actions/runners/registration-token` permission is
+needed — the runner boots directly from a short-lived JIT token.
+
+> **Repository-selected installs (a subset of repos) are still org-scoped.**
+> When you install the app on an organization and select only *some*
+> repositories (`repository_selection: "selected"`), the account type is still
+> `Organization`, so the app keys off the org scope and provisions a scale set
+> at the org level — the `repository_selection` field is not read. Control which
+> repos get the runner via runner groups / repo-level self-hosted-runner access
+> rather than the app's repository selection. This matches ARC behavior.
 
 ### Install
 
