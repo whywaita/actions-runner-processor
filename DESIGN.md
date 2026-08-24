@@ -182,11 +182,11 @@ func (s *Scaler) Shutdown(ctx context.Context)
 
 Drain semantics:
 
-- A runner is considered mid-job when `RunningJob()` is true — i.e. `Running job:` appears in its captured output. It is left alone and the monitor goroutine removes it once the job finishes.
-- An idle runner (not yet assigned / booted) is killed immediately; nothing is at stake.
+- A runner is considered mid-job when it is **tracked-busy** (the scaler marks it via `SetBusy` on `HandleJobStarted`) **or** `RunningJob()` is true (`Running job:` in captured output). The union covers both the brief window before the output line is flushed (when a just-assigned runner has not yet printed `Running job:`) and rare runner-name mismatches. A busy runner is left alone and the monitor goroutine removes it once the job finishes.
+- An idle runner (not assigned / booted) is killed immediately; nothing is at stake.
 - The runner is detached from the signal context: `Launch` binds the `systemd-nspawn` child via `exec.CommandContext(context.WithoutCancel(ctx), ...)` so the transition into shutdown does not SIGKILL live containers. The drain is the only place runners are terminated.
 
-The packaged systemd unit sets `TimeoutStopSec=660` (i.e. > default `10m` grace + margin). If `runner.shutdown_grace_timeout` is raised, `TimeoutStopSec` must be raised to match, otherwise systemd SIGKILLs the cgroup before the drain completes.
+The packaged systemd unit sets `TimeoutStopSec=660` (i.e. > default `10m` grace + margin) **and `KillMode=process`**. If `runner.shutdown_grace_timeout` is raised, `TimeoutStopSec` must be raised to match, otherwise systemd SIGKILLs the cgroup before the drain completes. `KillMode=process` is essential: with the default `control-group`, systemd sends SIGTERM/SIGKILL to the entire cgroup — including every nspawn child — on restart/stop, SIGKILLing runner containers mid-job before the processor's drain logic ever runs (observed as "Container ... terminated by signal KILL" + GitHub "lost communication"). With `KillMode=process` systemd signals only the processor main process; the processor owns and reaps its nspawn children.
 
 ### 3.3 Runner Launcher
 

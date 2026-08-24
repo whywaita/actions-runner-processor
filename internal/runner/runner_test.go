@@ -7,6 +7,23 @@ import (
 	"testing"
 )
 
+func TestSetBusy(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{}
+	if r.IsBusy() {
+		t.Fatal("IsBusy() = true initially, want false")
+	}
+	r.SetBusy(true)
+	if !r.IsBusy() {
+		t.Fatal("IsBusy() = false after SetBusy(true), want true")
+	}
+	r.SetBusy(false)
+	if r.IsBusy() {
+		t.Fatal("IsBusy() = true after SetBusy(false), want false")
+	}
+}
+
 func TestIsWithin(t *testing.T) {
 	t.Parallel()
 

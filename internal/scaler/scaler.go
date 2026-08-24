@@ -60,10 +60,18 @@ func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPa
 	}
 }
 
-// HandleJobStarted tracks a job that has started on a runner.
+// HandleJobStarted tracks a job that has started on a runner. The runner is
+// marked busy so graceful shutdown can tell an in-flight runner (must drain)
+// from an idle one. Lookups are best-effort by RunnerName -- if a runner is
+// un-tracked it's logged but this is not fatal, and the RunningJob() output
+// check still applies as a fallback in Shutdown.
 func (s *Scaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	r, ok := s.runners[job.RunnerName]
+	if ok {
+		r.SetBusy(true)
+	}
+	s.mu.Unlock()
 
 	s.logger.Info("job started",
 		slog.Int64("runnerRequestID", job.RunnerRequestID),
@@ -72,8 +80,16 @@ func (s *Scaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) e
 	return nil
 }
 
-// HandleJobCompleted cleans up after a completed job.
+// HandleJobCompleted cleans up after a completed job. The runner is un-marked
+// busy so a later shutdown no longer treats it as in-flight.
 func (s *Scaler) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
+	s.mu.Lock()
+	r, ok := s.runners[job.RunnerName]
+	if ok {
+		r.SetBusy(false)
+	}
+	s.mu.Unlock()
+
 	s.logger.Info("job completed",
 		slog.Int64("runnerRequestID", job.RunnerRequestID),
 		slog.String("runnerName", job.RunnerName),
@@ -134,8 +150,11 @@ func (s *Scaler) Shutdown(ctx context.Context) {
 	s.logger.Info("shutting down", slog.Int("runners", len(runners)))
 
 	// Kick any idle runners so they drain promptly; job-executing runners stay.
+	// A runner is considered in-flight if it is either tracked-busy (SetBusy via
+	// JobStarted) or its captured output shows "Running job:" -- the union covers
+	// both the pre-flush window and the rare name-mismatch case.
 	for _, r := range runners {
-		if !r.RunningJob() {
+		if !r.IsBusy() && !r.RunningJob() {
 			_ = r.Kill()
 		}
 	}

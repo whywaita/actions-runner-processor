@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // runnerUID is the in-container uid of the `runner` user (uid 1001, matching
@@ -39,6 +40,13 @@ type Runner struct {
 
 	cmd    *exec.Cmd
 	output *syncBuffer // mutex-protected so RunningJob can read while exec copies
+
+	// busy tracks whether a GitHub job has been assigned to this runner (set by
+	// the scaler via SetBusy when it sees a JobStarted for this runner). It is
+	// authoritative and does not depend on parsing captured output, so graceful
+	// shutdown can reliably tell an in-flight runner apart from an idle one even
+	// before the "Running job:" line is flushed.
+	busy atomic.Bool
 }
 
 // syncBuffer is a concurrency-safe in-memory byte buffer used to capture a
@@ -186,6 +194,19 @@ func (r *Runner) RunningJob() bool {
 		return false
 	}
 	return strings.Contains(r.output.String(), "Running job:")
+}
+
+// IsBusy reports whether a GitHub job has been assigned to this runner, as
+// tracked by the scaler via SetBusy on JobStarted/JobCompleted. Unlike
+// RunningJob it does not rely on output capture timing.
+func (r *Runner) IsBusy() bool {
+	return r.busy.Load()
+}
+
+// SetBusy marks whether this runner currently has an assigned job. The scaler
+// calls it from HandleJobStarted (true) and HandleJobCompleted (false).
+func (r *Runner) SetBusy(busy bool) {
+	r.busy.Store(busy)
 }
 
 // Wait blocks until the runner exits.

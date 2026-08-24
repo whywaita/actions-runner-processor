@@ -20,5 +20,15 @@ Environment=CONFIG_PATH=/etc/actions-runner-processor/config.yaml
 # graceful shutdown. Keep this in sync with shutdown_grace_timeout.
 TimeoutStopSec=660
 
+# CRITICAL for graceful shutdown: without KillMode=process (the default is
+# control-group), systemd sends SIGTERM/SIGKILL to the ENTIRE cgroup on
+# restart/stop -- including every nspawn child. That would SIGKILL the runner
+# containers mid-job before this unit's process ever runs its drain logic
+# (observed as "Container ... terminated by signal KILL" + GitHub "lost
+# communication"). With KillMode=process, systemd signals only the processor
+# main process, letting it drain in-flight jobs before exiting. The nspawn
+# children are owned and reaped by the processor itself.
+KillMode=process
+
 [Install]
 WantedBy=multi-user.target

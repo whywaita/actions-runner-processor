@@ -95,6 +95,33 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 	}
 }
 
+func TestHandleJobStartedMarksBusy(t *testing.T) {
+	t.Parallel()
+
+	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+	r := &runner.Runner{Name: "runner-busy"}
+	s.mu.Lock()
+	s.runners["runner-busy"] = r
+	s.mu.Unlock()
+
+	if r.IsBusy() {
+		t.Fatal("runner busy before JobStarted")
+	}
+	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: "runner-busy"}); err != nil {
+		t.Fatalf("HandleJobStarted error = %v", err)
+	}
+	if !r.IsBusy() {
+		t.Fatal("runner not busy after JobStarted")
+	}
+
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "runner-busy", Result: "success"}); err != nil {
+		t.Fatalf("HandleJobCompleted error = %v", err)
+	}
+	if r.IsBusy() {
+		t.Fatal("runner still busy after JobCompleted")
+	}
+}
+
 func TestShutdownNoRunners(t *testing.T) {
 	t.Parallel()
 
