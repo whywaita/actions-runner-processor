@@ -53,3 +53,10 @@ packages:
   - wget
   # whois provides mkpasswd, used to bake the runner user's password hash.
   - whois
+  # actions/runner is .NET-based. These are its documented runtime deps; the
+  # listener aborts at startup if ICU / system identity / TLS pieces are missing.
+  - libicu
+  - netbase
+  - tzdata
+  - ca-certificates
+  - locales
