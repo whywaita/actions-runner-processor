@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,8 +31,9 @@ type Scaler struct {
 	minRunners  int
 	maskedPaths []string
 
-	imagePath  string
-	entrypoint string
+	imagePath     string
+	entrypoint    string
+	workspacePath string
 
 	launch launchRunnerFunc
 
@@ -41,25 +44,34 @@ type Scaler struct {
 }
 
 // New creates a new Scaler.
-func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPaths []string, imagePath, entrypoint string) *Scaler {
+func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPaths []string, imagePath, entrypoint, workspacePath string) *Scaler {
 	return &Scaler{
-		client:      client,
-		scaleSetID:  scaleSetID,
-		maxRunners:  maxRunners,
-		minRunners:  minRunners,
-		maskedPaths: maskedPaths,
-		imagePath:   imagePath,
-		entrypoint:  entrypoint,
-		launch:      runner.Launch,
-		runners:     make(map[string]*runner.Runner),
-		logger:      slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
+		client:        client,
+		scaleSetID:    scaleSetID,
+		maxRunners:    maxRunners,
+		minRunners:    minRunners,
+		maskedPaths:   maskedPaths,
+		imagePath:     imagePath,
+		entrypoint:    entrypoint,
+		workspacePath: workspacePath,
+		launch:        runner.Launch,
+		runners:       make(map[string]*runner.Runner),
+		logger:        slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
 	}
 }
 
-// HandleJobStarted tracks a job that has started on a runner.
+// HandleJobStarted tracks a job that has started on a runner. The runner is
+// marked busy so graceful shutdown can tell an in-flight runner (must drain)
+// from an idle one. Lookups are best-effort by RunnerName -- if a runner is
+// un-tracked it's logged but this is not fatal, and the RunningJob() output
+// check still applies as a fallback in Shutdown.
 func (s *Scaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	r, ok := s.runners[job.RunnerName]
+	if ok {
+		r.SetBusy(true)
+	}
+	s.mu.Unlock()
 
 	s.logger.Info("job started",
 		slog.Int64("runnerRequestID", job.RunnerRequestID),
@@ -68,8 +80,16 @@ func (s *Scaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) e
 	return nil
 }
 
-// HandleJobCompleted cleans up after a completed job.
+// HandleJobCompleted cleans up after a completed job. The runner is un-marked
+// busy so a later shutdown no longer treats it as in-flight.
 func (s *Scaler) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
+	s.mu.Lock()
+	r, ok := s.runners[job.RunnerName]
+	if ok {
+		r.SetBusy(false)
+	}
+	s.mu.Unlock()
+
 	s.logger.Info("job completed",
 		slog.Int64("runnerRequestID", job.RunnerRequestID),
 		slog.String("runnerName", job.RunnerName),
@@ -104,16 +124,104 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 	return len(s.runners), nil
 }
 
-// Shutdown gracefully stops all runners.
-func (s *Scaler) Shutdown(_ context.Context) {
+// Shutdown gracefully stops all runners. The processor's per-runner monitor
+// goroutine (started in startRunner) already waits on each runner and removes
+// it from the tracked set the moment it exits -- so graceful shutdown is simply
+// "make idle runners exit now, then wait for the set to drain to zero".
+//
+// A runner that is currently executing a job (RunningJob) is left to finish
+// naturally; an idle runner is killed since nothing is at stake. If ctx expires
+// (the configured shutdown grace timeout) before the drain completes, the
+// remaining runners are force-killed. Waiting on the map (instead of calling
+// Wait() again) avoids double-Wait panics on the underlying exec.Cmd.
+func (s *Scaler) Shutdown(ctx context.Context) {
+	s.mu.Lock()
+	if len(s.runners) == 0 {
+		s.mu.Unlock()
+		s.logger.Info("shutting down", slog.Int("runners", 0))
+		return
+	}
+	runners := make([]*runner.Runner, 0, len(s.runners))
+	for _, r := range s.runners {
+		runners = append(runners, r)
+	}
+	s.mu.Unlock()
+
+	s.logger.Info("shutting down", slog.Int("runners", len(runners)))
+
+	// Kick any idle runners so they drain promptly; job-executing runners stay.
+	// A runner is considered in-flight if it is either tracked-busy (SetBusy via
+	// JobStarted) or its captured output shows "Running job:" -- the union covers
+	// both the pre-flush window and the rare name-mismatch case.
+	for _, r := range runners {
+		if !r.IsBusy() && !r.RunningJob() {
+			_ = r.Kill()
+		}
+	}
+
+	// Wait for the monitor goroutines to remove every runner, or until ctx
+	// expires and we force-kill the remainder.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		remaining := len(s.runners)
+		s.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			s.logger.Warn("shutdown grace timeout exceeded, force-killing remaining runners",
+				slog.Int("remaining", remaining))
+			s.forceKillAll()
+			// The monitor goroutines will pick up the kills and remove them.
+			s.waitDrain(ctx)
+			return
+		case <-ticker.C:
+		}
+	}
+
+	s.logger.Info("shutdown complete")
+}
+
+// forceKillAll kills every runner still tracked by the scaler.
+func (s *Scaler) forceKillAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.logger.Info("shutting down", slog.Int("runners", len(s.runners)))
 	for _, r := range s.runners {
 		_ = r.Kill()
 	}
+}
+
+// waitDrain blocks until every runner has been removed from the tracked set,
+// or ctx expires (whichever comes first), then clears the set.
+func (s *Scaler) waitDrain(ctx context.Context) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		remaining := len(s.runners)
+		s.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			// Give the monitor goroutines a moment to observe the kills before
+			// we clear the set and exit.
+			time.Sleep(1 * time.Second)
+			s.mu.Lock()
+			clear(s.runners)
+			s.mu.Unlock()
+			return
+		case <-ticker.C:
+		}
+	}
+	s.mu.Lock()
 	clear(s.runners)
+	s.mu.Unlock()
 }
 
 // MaxRunners returns the configured maximum.
@@ -141,11 +249,12 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 	runnerID := int64(jit.Runner.ID)
 
 	r := &runner.Runner{
-		Name:        name,
-		JITConfig:   jit.EncodedJITConfig,
-		MaskedPaths: s.maskedPaths,
-		ImagePath:   s.imagePath,
-		Entrypoint:  s.entrypoint,
+		Name:         name,
+		JITConfig:    jit.EncodedJITConfig,
+		MaskedPaths:  s.maskedPaths,
+		ImagePath:    s.imagePath,
+		Entrypoint:   s.entrypoint,
+		WorkspaceDir: filepath.Join(s.workspacePath, name),
 	}
 
 	if err := s.launch(ctx, r); err != nil {
@@ -179,9 +288,27 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 		delete(s.runners, name)
 		s.mu.Unlock()
 
+		// Remove the bind-mounted workspace + tool dirs now that the container has
+		// exited and they are no longer in use. These live on real disk and would
+		// otherwise accumulate per runner.
+		if r.WorkspaceDir != "" {
+			s.removeWorkspace(r.WorkspaceDir)
+		}
+
 		s.removeRunnerRegistration(ctx, runnerID, name)
 	}()
 	return nil
+}
+
+// removeWorkspace removes a runner's bind-mounted workspace and its _tool,
+// _diag, _temp, and home sibling directories from the host disk. Called
+// after the container has exited and the dirs are no longer in use.
+func (s *Scaler) removeWorkspace(workspaceDir string) {
+	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp", workspaceDir + "-home"} {
+		if err := os.RemoveAll(dir); err != nil {
+			s.logger.Warn("failed to remove workspace", "dir", dir, "error", err.Error())
+		}
+	}
 }
 
 func (s *Scaler) removeRunnerRegistration(ctx context.Context, runnerID int64, name string) {

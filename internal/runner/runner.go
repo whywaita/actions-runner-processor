@@ -6,10 +6,19 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
+
+// runnerUID is the in-container uid of the `runner` user (uid 1001, matching
+// the GitHub-hosted/image layout) that runs job steps. Bind-mounted host
+// workspace directories must be owned by this uid so the container runner
+// (which runs as uid 1001) can write into them.
+const runnerUID = 1001
 
 // Runner represents a running ephemeral runner instance.
 type Runner struct {
@@ -20,8 +29,44 @@ type Runner struct {
 	ImagePath  string // root filesystem directory (custom image)
 	Entrypoint string // absolute path (in-container) of the boot command
 
+	// WorkspaceDir is the host directory bind-mounted into the container at
+	// /opt/actions-runner/_work (and its _tool, _diag, _temp siblings). Placing
+	// the workspace, tool cache, diagnostic logs, and temp scratch on real disk
+	// is essential: --volatile=overlay puts all writes inside the container on a
+	// RAM-backed tmpfs overlay / toolchain extraction (Go, Node, ...) and runner
+	// diagnostics/logs fill it up with ENOSPC even when the host disk has plenty
+	// of free space. Empty string disables the bind (falls back to the overlay).
+	WorkspaceDir string
+
 	cmd    *exec.Cmd
-	output *bytes.Buffer
+	output *syncBuffer // mutex-protected so RunningJob can read while exec copies
+
+	// busy tracks whether a GitHub job has been assigned to this runner (set by
+	// the scaler via SetBusy when it sees a JobStarted for this runner). It is
+	// authoritative and does not depend on parsing captured output, so graceful
+	// shutdown can reliably tell an in-flight runner apart from an idle one even
+	// before the "Running job:" line is flushed.
+	busy atomic.Bool
+}
+
+// syncBuffer is a concurrency-safe in-memory byte buffer used to capture a
+// runner's combined stdout/stderr. os/exec writes into it from copy goroutines
+// while Scaler.Shutdown may read it (RunningJob) to decide whether to drain.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // Launch boots a runner in a systemd-nspawn container.
@@ -38,8 +83,21 @@ type Runner struct {
 // CAP_SYS_ADMIN covers storage/mount namespaces, CAP_NET_ADMIN the netfilter
 // (iptables) bridge network driver.
 func Launch(ctx context.Context, r *Runner) error {
+	// Create and prepare the host workspace dirs before booting the container.
+	// The bind source must exist and be writable by the container's `runner`
+	// user (uid 1001). The processor runs as root, so chown works here.
+	if r.WorkspaceDir != "" {
+		if err := prepareWorkspace(r.WorkspaceDir); err != nil {
+			return fmt.Errorf("prepare workspace: %w", err)
+		}
+	}
 	args := nspawnArgs(r)
-	cmd := exec.CommandContext(ctx, "systemd-nspawn", args...)
+	// Launch the container on a context that is unaffected by cancellation of
+	// the caller's context (e.g. the processor's SIGTERM shutdown context).
+	// If we bound the nspawn process to the signal-cancelled context,
+	// exec.CommandContext would SIGKILL the container mid-job the moment the
+	// process begins its graceful shutdown, losing in-flight jobs.
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), "systemd-nspawn", args...)
 	// Keep JIT config in the child environment too so any wrapper process the
 	// entrypoint spawns inherits it.
 	cmd.Env = append(cmd.Environ(),
@@ -47,10 +105,10 @@ func Launch(ctx context.Context, r *Runner) error {
 		"HOME=/home/runner",
 	)
 
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	r.output = &output
+	output := &syncBuffer{}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	r.output = output
 	r.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
@@ -83,13 +141,59 @@ func nspawnArgs(r *Runner) []string {
 		// treat the bare destination path as the in-container command to run.
 		args = append(args, "--bind-ro=/dev/null:"+path)
 	}
+	// Bind the workspace, tool cache, diagnostic dir, and temp scratch onto
+	// real host disk. Under --volatile=overlay every other write lands on the
+	// RAM-backed tmpfs overlay, which the Go/Node toolchain extraction AND
+	// runner diagnostic logs exhaust (ENOSPC). Only bind when a WorkspaceDir is
+	// configured.
+	if r.WorkspaceDir != "" {
+		for hostDir, containerDir := range workspaceBindings(r.WorkspaceDir) {
+			args = append(args, "--bind", hostDir+":"+containerDir)
+		}
+	}
 	args = append(args, r.Entrypoint)
 	return args
+}
+
+// workspaceBindings maps the host workspace directories (created by
+// prepareWorkspace) to their in-container mount targets. The github-hosted
+// layout writes toolchain caches to _tool, runner diagnostics to _diag, job
+// temp scripts to _temp, and the runner user's whole home directory (Go build
+// cache $HOME/.cache, npm cache $HOME/.npm, module cache $HOME/go/pkg/mod, pip
+// $HOME/.cache/pip, ...) to /home/runner -- all must live on real disk or the
+// RAM-backed overlay fills up with ENOSPC. Binding the entire home avoids the
+// whack-a-mole of inventing a new -<cache> sibling for every tool's cache dir.
+func workspaceBindings(workspaceDir string) map[string]string {
+	return map[string]string{
+		workspaceDir:           "/opt/actions-runner/_work",
+		workspaceDir + "-tool": "/opt/actions-runner/_tool",
+		workspaceDir + "-diag": "/opt/actions-runner/_diag",
+		workspaceDir + "-temp": "/opt/actions-runner/_temp",
+		workspaceDir + "-home": "/home/runner",
+	}
 }
 
 func isWithin(path, root string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// prepareWorkspace creates the host workspace, tool-cache, diagnostic, and
+// temp-scratch directories that are bind-mounted into the container at
+// /opt/actions-runner/_work, _tool, _diag, and _temp, and chowns them to the
+// container's `runner` user (uid 1001). The container runner writes job
+// workspaces, toolchain caches, diagnostics, and temp scripts into these dirs,
+// which must therefore exist and be runner-owned before the container boots.
+func prepareWorkspace(workspaceDir string) error {
+	for dir := range workspaceBindings(workspaceDir) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+		if err := os.Chown(dir, runnerUID, runnerUID); err != nil {
+			return fmt.Errorf("chown %s: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 // Output returns the captured stdout and stderr from the runner process.
@@ -98,6 +202,30 @@ func (r *Runner) Output() string {
 		return ""
 	}
 	return r.output.String()
+}
+
+// RunningJob reports whether the runner has started executing a job
+// ("Running job: ..." appears in its captured output) and has not yet exited.
+// Used during graceful shutdown to decide whether to drain (wait for an
+// in-flight job to finish) or tear down immediately.
+func (r *Runner) RunningJob() bool {
+	if r.output == nil {
+		return false
+	}
+	return strings.Contains(r.output.String(), "Running job:")
+}
+
+// IsBusy reports whether a GitHub job has been assigned to this runner, as
+// tracked by the scaler via SetBusy on JobStarted/JobCompleted. Unlike
+// RunningJob it does not rely on output capture timing.
+func (r *Runner) IsBusy() bool {
+	return r.busy.Load()
+}
+
+// SetBusy marks whether this runner currently has an assigned job. The scaler
+// calls it from HandleJobStarted (true) and HandleJobCompleted (false).
+func (r *Runner) SetBusy(busy bool) {
+	r.busy.Store(busy)
 }
 
 // Wait blocks until the runner exits.

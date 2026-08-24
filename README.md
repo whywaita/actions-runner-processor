@@ -140,6 +140,10 @@ runner:
   entrypoint: "/opt/actions-runner/run.sh"         # in-container boot command
   max_runners: 4                                   # 0 = runtime.NumCPU()
   min_runners: 0                                   # warm idle runners
+  # How long to keep running on SIGTERM/SIGINT so in-flight jobs finish before
+  # force-killing remaining runner containers (default 10m). Must be <= the
+  # unit's TimeoutStopSec (default 660s).
+  shutdown_grace_timeout: "10m"
 
 metrics:
   enabled: true

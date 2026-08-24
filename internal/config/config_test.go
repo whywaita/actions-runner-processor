@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -74,11 +75,73 @@ github:
 	if cfg.Runner.Entrypoint != "/opt/actions-runner/run.sh" {
 		t.Errorf("Entrypoint: want /opt/actions-runner/run.sh, got %s", cfg.Runner.Entrypoint)
 	}
+	if cfg.Runner.WorkspacePath != "/opt/runner/workspaces" {
+		t.Errorf("WorkspacePath: want /opt/runner/workspaces, got %s", cfg.Runner.WorkspacePath)
+	}
+	if cfg.Runner.ShutdownGraceTimeout.Duration != 10*time.Minute {
+		t.Errorf("ShutdownGraceTimeout: want 10m, got %v", cfg.Runner.ShutdownGraceTimeout.Duration)
+	}
 	if cfg.GitHub.APIURL != "https://api.github.com" {
 		t.Errorf("APIURL: want https://api.github.com, got %s", cfg.GitHub.APIURL)
 	}
 	if cfg.GitHub.URL != "https://github.com" {
 		t.Errorf("URL: want https://github.com, got %s", cfg.GitHub.URL)
+	}
+}
+
+func TestShutdownGraceTimeoutParsing(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(keyPath, []byte(`-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA0Z3...
+-----END RSA PRIVATE KEY-----`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+github:
+  client_id: "123456"
+  private_key_path: "`+keyPath+`"
+runner:
+  shutdown_grace_timeout: "2m"
+    `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", cfgPath)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runner.ShutdownGraceTimeout.Duration != 2*time.Minute {
+		t.Errorf("ShutdownGraceTimeout: want 2m, got %v", cfg.Runner.ShutdownGraceTimeout.Duration)
+	}
+}
+
+func TestInvalidShutdownGraceTimeout(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(keyPath, []byte(`-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA0Z3...
+-----END RSA PRIVATE KEY-----`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+github:
+  client_id: "123456"
+  private_key_path: "`+keyPath+`"
+runner:
+  shutdown_grace_timeout: "not-a-duration"
+    `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", cfgPath)
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() = nil error, want parse error for invalid duration")
 	}
 }
 

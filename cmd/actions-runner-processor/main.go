@@ -81,6 +81,8 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
+	var scalersMu sync.Mutex
+	var scalers []*scaler.Scaler
 
 	for _, inst := range installations {
 		wg.Add(1)
@@ -153,9 +155,13 @@ func main() {
 				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
 				cfg.Runner.ImagePath,
 				cfg.Runner.Entrypoint,
+				cfg.Runner.WorkspacePath,
 			)
 			registry.Register(inst.Scope, s)
 			webRegistry.Register(inst.Scope, s)
+			scalersMu.Lock()
+			scalers = append(scalers, s)
+			scalersMu.Unlock()
 
 			l, err := listener.New(session, listener.Config{
 				ScaleSetID: scaleSet.ID,
@@ -176,6 +182,29 @@ func main() {
 
 	wg.Wait()
 	slog.Info("all listeners stopped")
+
+	// Graceful shutdown: listeners have stopped (no new job acquisition), so now
+	// drain the runners that may still be executing in-flight jobs. Without this
+	// wait the process would exit immediately and systemd would SIGKILL the whole
+	// cgroup -- including any nspawn containers mid-job, losing the job. See
+	// scaler.Scaler.Shutdown for the drain semantics.
+	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Runner.ShutdownGraceTimeout.Duration)
+	defer drainCancel()
+
+	scalersMu.Lock()
+	toDrain := append([]*scaler.Scaler(nil), scalers...)
+	scalersMu.Unlock()
+
+	var drainWG sync.WaitGroup
+	for _, s := range toDrain {
+		drainWG.Add(1)
+		go func(s *scaler.Scaler) {
+			defer drainWG.Done()
+			s.Shutdown(drainCtx)
+		}(s)
+	}
+	drainWG.Wait()
+	slog.Info("all runners drained")
 }
 
 // setupLogging configures the default slog handler based on logFormat.

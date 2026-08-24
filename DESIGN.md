@@ -143,7 +143,7 @@ type Scaler struct {
 func (s *Scaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error
 func (s *Scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error
 func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error)
-func (s *Scaler) Shutdown(ctx context.Context)  // graceful shutdown: kill all runners
+func (s *Scaler) Shutdown(ctx context.Context)  // graceful drain + force-kill on timeout
 ```
 
 **Responsibilities**: runner lifecycle management (launch, track, cleanup).
@@ -168,6 +168,26 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 
 Runners are tracked by `RunnerName` (the name specified when issuing the JIT Config). When `HandleJobCompleted` is called, the corresponding Runner process is cleaned up.
 
+### Graceful shutdown
+
+On `SIGTERM`/`SIGINT` the listener stops acquiring new jobs, then each `Scaler.Shutdown` runs a drain window (`runner.shutdown_grace_timeout`, default `10m`) so in-flight jobs can finish before the process exits. Without this drain the process would exit immediately and systemd would SIGKILL the whole cgroup — including any nspawn containers still running a job — losing the job (observed as GitHub's "lost communication" + `Container ... terminated by signal KILL`).
+
+```go
+func (s *Scaler) Shutdown(ctx context.Context)
+    // 1. Kick idle runners (not executing a job) so they drain promptly.
+    // 2. Wait for the tracked set to drain to zero (each runner's monitor
+    //    goroutine removes it on exit).
+    // 3. On ctx timeout, force-kill the remainder.
+```
+
+Drain semantics:
+
+- A runner is considered mid-job when it is **tracked-busy** (the scaler marks it via `SetBusy` on `HandleJobStarted`) **or** `RunningJob()` is true (`Running job:` in captured output). The union covers both the brief window before the output line is flushed (when a just-assigned runner has not yet printed `Running job:`) and rare runner-name mismatches. A busy runner is left alone and the monitor goroutine removes it once the job finishes.
+- An idle runner (not assigned / booted) is killed immediately; nothing is at stake.
+- The runner is detached from the signal context: `Launch` binds the `systemd-nspawn` child via `exec.CommandContext(context.WithoutCancel(ctx), ...)` so the transition into shutdown does not SIGKILL live containers. The drain is the only place runners are terminated.
+
+The packaged systemd unit sets `TimeoutStopSec=660` (i.e. > default `10m` grace + margin) **and `KillMode=process`**. If `runner.shutdown_grace_timeout` is raised, `TimeoutStopSec` must be raised to match, otherwise systemd SIGKILLs the cgroup before the drain completes. `KillMode=process` is essential: with the default `control-group`, systemd sends SIGTERM/SIGKILL to the entire cgroup — including every nspawn child — on restart/stop, SIGKILLing runner containers mid-job before the processor's drain logic ever runs (observed as "Container ... terminated by signal KILL" + GitHub "lost communication"). With `KillMode=process` systemd signals only the processor main process; the processor owns and reaps its nspawn children.
+
 ### 3.3 Runner Launcher
 
 `internal/runner/` — starts the runner via systemd-nspawn.
@@ -189,6 +209,8 @@ func (r *Runner) Kill() error
 
 `ImagePath` (a custom rootfs directory) is booted as a read-only lower layer, and all job writes land on a private overlay injected via `--volatile=overlay`. This overlay is automatically discarded when the container exits, so a job can freely rewrite `/usr` with e.g. `sudo apt install` without affecting other jobs or the host.
 
+> **Disk note**: `--volatile=overlay` keeps the writable overlay on a RAM-backed tmpfs (≈ 25% of host RAM by default; `TMPFS_LIMITS_ROOTFS`). Toolchain downloads / extraction (`actions/setup-go`, `setup-node`), the runner's own diagnostic logs / temp scratch, and the runner user's home build cache (`$HOME/.cache` — where Go/Node/npm/pip cache) all write hundreds of MB and easily exhaust this tmpfs with `ENOSPC: no space left on device` even when the host disk is nearly empty. To avoid this, the job workspace (`/opt/actions-runner/_work`), tool cache (`_tool`), diagnostic dir (`_diag`), temp scratch (`_temp`), and the runner home cache (`/home/runner/.cache`) are all bind-mounted onto real host disk at `runner.workspace_path` (default `/opt/runner/workspaces`, a per-runner subdirectory). The processor creates and chowns these dirs to the container's `runner` uid (1001) before boot, and removes them when the runner exits. Note that this bind set is a judgement call: any tool that writes large data outside these paths (e.g. `sudo apt-get install` into `/usr`) still consumes the limited RAM-backed upper layer.
+
 ```bash
 # Boot a runner per job in an nspawn container
 R_NAME="runner-$(uuidgen | cut -c1-8)"
@@ -204,6 +226,8 @@ systemd-nspawn \
   --bind-ro=/etc/hosts \
   --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
   --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem \
+  --bind "/opt/runner/workspaces/${R_NAME}:/opt/actions-runner/_work" \
+  --bind "/opt/runner/workspaces/${R_NAME}-tool:/opt/actions-runner/_tool" \
   /opt/actions-runner/run.sh
 
 # On job completion, just Kill(); systemd-nspawn cleans up the overlay and container
@@ -407,6 +431,7 @@ scale_set_name: "runner-listener"  # Scale Set name shared across all installati
 runner:
   image_path: "/opt/runner/image"  # custom runner image (rootfs directory)
   entrypoint: "/opt/actions-runner/run.sh"  # in-container boot command
+  workspace_path: "/opt/runner/workspaces"  # per-runner work/tool dirs on real disk (avoids ENOSPC)
   version: "latest"                # actions/runner version (informational)
 
 metrics:
