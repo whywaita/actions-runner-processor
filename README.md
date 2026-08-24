@@ -167,36 +167,45 @@ when unset.
 
 ### GitHub App Permissions
 
-This app uses the same runner-scale-set + JIT model as ARC, so the GitHub App
-needs the following permissions:
+This app uses the same runner-scale-set + JIT model as ARC. The GitHub App
+permissions needed depend on the **scope** the listener resolves for an
+installation (the listener keys off the *URL path*, not the account type):
 
-| Permission | Access | Reason |
-|-----------|--------|--------|
-| `administration` | **Read** | Read installation info; create / read runner scale sets (`_apis/runtime/runnerscalesets`) |
-| `organization_self_hosted_runners` | **Write** | Generate JIT runner configs (`.../generatejitconfig`), acquire job messages (`.../sessions`), and remove runner registrations |
-| `metadata` | Read | Standard minimum App permission (installations / repositories discovery) — usually present by default |
+- **Organization / org-scoped** (`https://github.com/<org>`) — scale set for the
+  whole org:
 
-**Install scope.** The listener auto-detects App installations by account type:
+  | Permission | Access | Reason |
+  |-----------|--------|--------|
+  | `administration` | **Read** | Read installation info; create / read runner scale sets (`_apis/runtime/runnerscalesets`) |
+  | `organization_self_hosted_runners` | **Write** | Generate JIT runner configs (`.../generatejitconfig`), acquire job messages (`.../sessions`), remove runner registrations |
+  | `metadata` | Read | Standard minimum App permission (installations / repositories discovery) — usually present by default |
 
-- **Organization** installations → the **org scope** (`https://github.com/<org>`),
-  so the app creates/uses one scale set for the whole org.
-- **User / personal** installations → expanded to **per-repository scopes**
-  (`https://github.com/<user>/<repo>`), because the runner-scale-set
-  registration endpoint is org-based and 404s for personal accounts.
+- **Repository-scoped** (`https://github.com/<user>/<repo>`, e.g. a personal
+  account like `whywaita/sandbox`) — a per-repo runner:
 
-> **Repository-selected installs (a subset of repos) are treated as org-wide.**
-> When you install the app on an organization and select only *some*
-> repositories (`repository_selection: "selected"`), the app still keys off the
-> org scope and provisions a scale set at the org level — the
-> `repository_selection` field is not read. The org permissions team decides
-> which repos the runner can serve; select which repos get the runner by
-> configuring runner groups / repo-level self-hosted-runner access, not by the
-> app's repository selection. This matches how ARC-style scale-set runners
-> behave.
+  | Permission | Access | Reason |
+  |-----------|--------|--------|
+  | `administration` | **Write** | Manage the repo's self-hosted runners (runner-scale-set registrations for the repo) |
+  | `metadata` | Read | Repositories discovery — present by default |
+
+The listener auto-detects installations by account type (`Account.Type`):
+- **User / personal** installations are expanded to **per-repository scopes**
+  (`https://github.com/<user>/<repo>`), so each repo is served by its own
+  repo-scoped runner → needs `administration: write`.
+- **Organization** installations use the **org scope**
+  (`https://github.com/<org>`) → needs `organization_self_hosted_runners: write`.
 
 Note: unlike the legacy registration-token model, this app uses **JIT config**
 (`generatejitconfig`), so no `actions/runners/registration-token` permission is
 needed — the runner boots directly from a short-lived JIT token.
+
+> **Repository-selected installs (a subset of repos) are still org-scoped.**
+> When you install the app on an organization and select only *some*
+> repositories (`repository_selection: "selected"`), the account type is still
+> `Organization`, so the app keys off the org scope and provisions a scale set
+> at the org level — the `repository_selection` field is not read. Control which
+> repos get the runner via runner groups / repo-level self-hosted-runner access
+> rather than the app's repository selection. This matches ARC behavior.
 
 ### Install
 
