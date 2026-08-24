@@ -53,10 +53,8 @@ packages:
   - wget
   # whois provides mkpasswd, used to bake the runner user's password hash.
   - whois
-  # actions/runner is .NET-based. These are its documented runtime deps; the
-  # listener aborts at startup if ICU / system identity / TLS pieces are missing.
-  - libicu
-  - netbase
-  - tzdata
+  # ca-certificates: trusted roots so HTTPS to GitHub works out of the box.
+  # The actions/runner's own native .NET deps (libicu, libssl3, libkrb5, zlib,
+  # liblttng-ust) are installed by bin/installdependencies.sh inside the chroot
+  # at build time (see image/build-image.sh), so they are not listed here.
   - ca-certificates
-  - locales

@@ -87,6 +87,23 @@ curl -sL "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/
 # via systemd-nspawn --setenv) and boots the listener.
 chmod +x "$ROOTFS/opt/actions-runner/run.sh"
 
+# actions/runner is .NET-based and needs native system deps (libicu, libssl,
+# libkrb5, zlib, liblttng-ust) at startup. The runner ships the official
+# installdependencies.sh that installs exactly these for the current release;
+# call it inside the chroot so the listener boots and stays correct across
+# runner upgrades.
+echo ">>> install actions/runner native dependencies"
+chroot "$ROOTFS" /bin/bash -c "
+  export DEBIAN_FRONTEND=noninteractive
+  cd /opt/actions-runner
+  if [ -x bin/installdependencies.sh ]; then
+    ./bin/installdependencies.sh
+  else
+    echo 'warning: bin/installdependencies.sh not found; installing fallback set'
+    apt-get install -y -qq libkrb5-3 zlib1g liblttng-ust1t64 libssl3 libicu74
+  fi
+"
+
 # Create a dedicated runner user, mirroring the GitHub-hosted / full-image
 # convention (uid 1001, home /home/runner, passwordless sudo). launchNspawn
 # boots the container with --user=runner, so a `runner` account must exist in
