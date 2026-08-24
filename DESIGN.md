@@ -234,6 +234,20 @@ base, applies the apt packages from `image/image.yaml` and installs
 rootfs into `actions-runner-image-<arch>.tar.gz`. Fast (minutes), runs on
 PRs/pushes and `workflow_dispatch`.
 
+**What the lightweight image contains:**
+
+- A minimal Debian/Ubuntu base (`debootstrap --variant=minbase`), booted with
+  `--as-pid2` in an ephemeral overlay (no systemd as PID1 needed).
+- The `actions/runner` binary at `/opt/actions-runner`, with the container
+  entrypoint `/opt/actions-runner/run.sh` booting a JIT-configured listener.
+- The extra apt packages declared in `image/image.yaml` (build tools, runtime
+  deps), baked in so jobs don't install them per run.
+- A dedicated `runner` user (uid 1001, home `/home/runner`, passwordless sudo)
+  mirroring the GitHub-hosted layout. `launchNspawn` boots the container with
+  `--user=runner`, so the runner process and job steps run as this user and
+  `sudo` works inside jobs. `/opt/actions-runner` and `/home/runner` are owned
+  by `runner`.
+
 **Full (option A)** — `image/build-image-full.sh` produces a
 GitHub-hosted-compatible toolset. `actions/runner-images` is built by running
 `images/ubuntu/scripts/build/*.sh` in order (its Packer templates are just a

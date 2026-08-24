@@ -62,6 +62,21 @@ apt install systemd-container
 - `image/build-image.sh` — debootsraps the base, provisions the packages and
   runner in a chroot, and packs the resulting rootfs into a `.tar.gz`.
 
+**What the (lightweight) image is / contains:**
+
+| Component | Where | Notes |
+|---|---|---|
+| Minimal Debian/Ubuntu base | `/` | `debootstrap --variant=minbase`; no systemd as PID1 (booted `--as-pid2` in an ephemeral overlay) |
+| `actions/runner` binary | `/opt/actions-runner` | The container entrypoint `/opt/actions-runner/run.sh` boots a JIT-configured listener |
+| Extra apt packages | `/usr` | `build-essential`, git, curl, jq, python3, `sudo`, etc. — declared in `image.yaml`, baked in so jobs don't install them per run |
+| Dedicated `runner` user | uid 1001, `/home/runner` | Passwordless sudo, mirrors the GitHub-hosted layout |
+
+The image is booted **read-only** with an **ephemeral overlay**: jobs can
+`apt install` and mutate `/usr` freely, but every write lands on a private
+upper layer that is **discarded when the runner exits**, so one job never
+affects another job or the host. Because the container boots as the `runner`
+user with passwordless sudo, `sudo` works inside job steps.
+
 **Build it locally** (needs root for debootstrap/chroot):
 
 ```bash
