@@ -176,13 +176,23 @@ needs the following permissions:
 | `organization_self_hosted_runners` | **Write** | Generate JIT runner configs (`.../generatejitconfig`), acquire job messages (`.../sessions`), and remove runner registrations |
 | `metadata` | Read | Standard minimum App permission (installations / repositories discovery) — usually present by default |
 
-**Install scope.** Install the app on an **organization** for the simplest
-setup (scale sets are org-scoped). The listener auto-detects App
-installations:
-- **Organization** installations use the org scope directly.
-- **User / personal** installations are expanded to per-repository scopes (the
-  runner-scale-set registration endpoint is org-based and 404s for personal
-  accounts).
+**Install scope.** The listener auto-detects App installations by account type:
+
+- **Organization** installations → the **org scope** (`https://github.com/<org>`),
+  so the app creates/uses one scale set for the whole org.
+- **User / personal** installations → expanded to **per-repository scopes**
+  (`https://github.com/<user>/<repo>`), because the runner-scale-set
+  registration endpoint is org-based and 404s for personal accounts.
+
+> **Repository-selected installs (a subset of repos) are treated as org-wide.**
+> When you install the app on an organization and select only *some*
+> repositories (`repository_selection: "selected"`), the app still keys off the
+> org scope and provisions a scale set at the org level — the
+> `repository_selection` field is not read. The org permissions team decides
+> which repos the runner can serve; select which repos get the runner by
+> configuring runner groups / repo-level self-hosted-runner access, not by the
+> app's repository selection. This matches how ARC-style scale-set runners
+> behave.
 
 Note: unlike the legacy registration-token model, this app uses **JIT config**
 (`generatejitconfig`), so no `actions/runners/registration-token` permission is
