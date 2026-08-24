@@ -189,6 +189,8 @@ func (r *Runner) Kill() error
 
 `ImagePath` (a custom rootfs directory) is booted as a read-only lower layer, and all job writes land on a private overlay injected via `--volatile=overlay`. This overlay is automatically discarded when the container exits, so a job can freely rewrite `/usr` with e.g. `sudo apt install` without affecting other jobs or the host.
 
+> **Disk note**: `--volatile=overlay` keeps the writable overlay on a RAM-backed tmpfs (≈ half of host RAM by default). Toolchain downloads / extraction (`actions/setup-go`, `setup-node`) write hundreds of MB and easily exhaust this tmpfs with `ENOSPC: no space left on device` even when the host disk is nearly empty. To avoid this, the job workspace (`/opt/actions-runner/_work`) and tool cache (`/opt/actions-runner/_tool`) are bind-mounted onto real host disk at `runner.workspace_path` (default `/opt/runner/workspaces`, a per-runner subdirectory). The processor creates and chowns these dirs to the container's `runner` uid (1001) before boot, and removes them when the runner exits.
+
 ```bash
 # Boot a runner per job in an nspawn container
 R_NAME="runner-$(uuidgen | cut -c1-8)"
@@ -204,6 +206,8 @@ systemd-nspawn \
   --bind-ro=/etc/hosts \
   --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
   --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem \
+  --bind "/opt/runner/workspaces/${R_NAME}:/opt/actions-runner/_work" \
+  --bind "/opt/runner/workspaces/${R_NAME}-tool:/opt/actions-runner/_tool" \
   /opt/actions-runner/run.sh
 
 # On job completion, just Kill(); systemd-nspawn cleans up the overlay and container
@@ -407,6 +411,7 @@ scale_set_name: "runner-listener"  # Scale Set name shared across all installati
 runner:
   image_path: "/opt/runner/image"  # custom runner image (rootfs directory)
   entrypoint: "/opt/actions-runner/run.sh"  # in-container boot command
+  workspace_path: "/opt/runner/workspaces"  # per-runner work/tool dirs on real disk (avoids ENOSPC)
   version: "latest"                # actions/runner version (informational)
 
 metrics:

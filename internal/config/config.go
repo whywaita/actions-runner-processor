@@ -46,6 +46,12 @@ type RunnerConfig struct {
 	// Entrypoint is the absolute path (inside the container) of the command
 	// that launches the runner. Defaults to /opt/actions-runner/run.sh.
 	Entrypoint string `yaml:"entrypoint"`
+	// WorkspacePath is the host directory (per-runner subdirectory) that is
+	// bind-mounted into the container at /opt/actions-runner/_work and
+	// /opt/actions-runner/_tool. It must live on real disk (not the
+	// volatile-overlay tmpfs) or toolchain extraction fills the RAM-backed
+	// overlay with ENOSPC. Defaults to /opt/runner/workspaces.
+	WorkspacePath string `yaml:"workspace_path"`
 }
 
 // MetricsConfig holds Prometheus exporter settings.
@@ -108,6 +114,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.Runner.Entrypoint == "" {
 		cfg.Runner.Entrypoint = "/opt/actions-runner/run.sh"
+	}
+	if cfg.Runner.WorkspacePath == "" {
+		cfg.Runner.WorkspacePath = "/opt/runner/workspaces"
 	}
 	if cfg.GitHub.APIURL == "" {
 		cfg.GitHub.APIURL = "https://api.github.com"

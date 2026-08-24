@@ -6,10 +6,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// runnerUID is the in-container uid of the `runner` user (uid 1001, matching
+// the GitHub-hosted/image layout) that runs job steps. Bind-mounted host
+// workspace directories must be owned by this uid so the container runner
+// (which runs as uid 1001) can write into them.
+const runnerUID = 1001
 
 // Runner represents a running ephemeral runner instance.
 type Runner struct {
@@ -19,6 +26,15 @@ type Runner struct {
 
 	ImagePath  string // root filesystem directory (custom image)
 	Entrypoint string // absolute path (in-container) of the boot command
+
+	// WorkspaceDir is the host directory bind-mounted into the container at
+	// /opt/actions-runner/_work (and its _tool sibling). Placing the workspace
+	// and tool cache on real disk is essential: --volatile=overlay puts all
+	// writes inside the container on a RAM-backed tmpfs overlay / toolchain
+	// (Go, Node, ...) extraction fills it up with ENOSPC even when the host
+	// disk has plenty of free space. Empty string disables the bind (falls
+	// back to the overlay).
+	WorkspaceDir string
 
 	cmd    *exec.Cmd
 	output *bytes.Buffer
@@ -38,6 +54,14 @@ type Runner struct {
 // CAP_SYS_ADMIN covers storage/mount namespaces, CAP_NET_ADMIN the netfilter
 // (iptables) bridge network driver.
 func Launch(ctx context.Context, r *Runner) error {
+	// Create and prepare the host workspace dirs before booting the container.
+	// The bind source must exist and be writable by the container's `runner`
+	// user (uid 1001). The processor runs as root, so chown works here.
+	if r.WorkspaceDir != "" {
+		if err := prepareWorkspace(r.WorkspaceDir); err != nil {
+			return fmt.Errorf("prepare workspace: %w", err)
+		}
+	}
 	args := nspawnArgs(r)
 	cmd := exec.CommandContext(ctx, "systemd-nspawn", args...)
 	// Keep JIT config in the child environment too so any wrapper process the
@@ -83,6 +107,14 @@ func nspawnArgs(r *Runner) []string {
 		// treat the bare destination path as the in-container command to run.
 		args = append(args, "--bind-ro=/dev/null:"+path)
 	}
+	// Bind the workspace (and tool cache) onto real host disk. Under
+	// --volatile=overlay every other write lands on the RAM-backed tmpfs
+	// overlay, which the Go/Node toolchain extraction exhausts (ENOSPC). Only
+	// bind when a WorkspaceDir is configured.
+	if r.WorkspaceDir != "" {
+		args = append(args, "--bind", r.WorkspaceDir+":/opt/actions-runner/_work")
+		args = append(args, "--bind", r.WorkspaceDir+"-tool:/opt/actions-runner/_tool")
+	}
 	args = append(args, r.Entrypoint)
 	return args
 }
@@ -90,6 +122,25 @@ func nspawnArgs(r *Runner) []string {
 func isWithin(path, root string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// prepareWorkspace creates the host workspace and tool-cache directories that
+// are bind-mounted into the container at /opt/actions-runner/_work and
+// /opt/actions-runner/_tool, and chowns them to the container's `runner` user
+// (uid 1001). The container runner writes job workspaces and toolchain caches
+// into these dirs, which must therefore exist and be runner-owned before the
+// container boots.
+func prepareWorkspace(workspaceDir string) error {
+	dirs := []string{workspaceDir, workspaceDir + "-tool"}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+		if err := os.Chown(dir, runnerUID, runnerUID); err != nil {
+			return fmt.Errorf("chown %s: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 // Output returns the captured stdout and stderr from the runner process.

@@ -2,6 +2,8 @@ package runner
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -40,11 +42,12 @@ func TestNspawnArgs(t *testing.T) {
 	t.Parallel()
 
 	r := &Runner{
-		Name:        "runner-eaa075e1",
-		JITConfig:   "some-jit-config",
-		ImagePath:   "/opt/runner/image",
-		Entrypoint:  "/opt/actions-runner/run.sh",
-		MaskedPaths: []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
+		Name:         "runner-eaa075e1",
+		JITConfig:    "some-jit-config",
+		ImagePath:    "/opt/runner/image",
+		Entrypoint:   "/opt/actions-runner/run.sh",
+		MaskedPaths:  []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
+		WorkspaceDir: "/opt/runner/workspaces/runner-eaa075e1",
 	}
 	args := nspawnArgs(r)
 
@@ -60,6 +63,10 @@ func TestNspawnArgs(t *testing.T) {
 		"--bind-ro=/etc/resolv.conf",
 		"--bind-ro=/etc/hosts",
 		"--bind-ro=/dev/null:/etc/actions-runner-processor/config.yaml",
+		"--bind",
+		"/opt/runner/workspaces/runner-eaa075e1:/opt/actions-runner/_work",
+		"--bind",
+		"/opt/runner/workspaces/runner-eaa075e1-tool:/opt/actions-runner/_tool",
 		"/opt/actions-runner/run.sh",
 	}
 	if len(args) != len(want) {
@@ -80,6 +87,49 @@ func TestNspawnArgs(t *testing.T) {
 		}
 		if a == "/home/secret.pem" {
 			t.Errorf("non-/etc path leaked into args: %v", args)
+		}
+	}
+}
+
+func TestNspawnArgsNoWorkspace(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{
+		Name:       "runner-eaa075e1",
+		JITConfig:  "some-jit-config",
+		ImagePath:  "/opt/runner/image",
+		Entrypoint: "/opt/actions-runner/run.sh",
+	}
+	args := nspawnArgs(r)
+
+	for _, a := range args {
+		if a == "--bind" {
+			t.Fatalf("no workspace bind expected when WorkspaceDir is empty, got: %v", args)
+		}
+	}
+	if args[len(args)-1] != "/opt/actions-runner/run.sh" {
+		t.Fatalf("entrypoint must remain the last arg, got: %v", args)
+	}
+}
+
+func TestPrepareWorkspace(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chown to uid 1001 requires root")
+	}
+
+	base := t.TempDir()
+	workspaceDir := filepath.Join(base, "ws")
+	if err := prepareWorkspace(workspaceDir); err != nil {
+		t.Fatalf("prepareWorkspace() error = %v", err)
+	}
+
+	for _, dir := range []string{workspaceDir, workspaceDir + "-tool"} {
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat %s: %v", dir, err)
+		}
+		if !fi.IsDir() {
+			t.Errorf("%s is not a directory", dir)
 		}
 	}
 }
