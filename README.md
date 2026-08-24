@@ -167,10 +167,26 @@ when unset.
 
 ### GitHub App Permissions
 
-| Permission | Reason |
-|-----------|--------|
-| `administration:read` | Read installation info, manage runner groups/scale sets |
-| `organization_self_hosted_runners:write` | Issue runner registration tokens |
+This app uses the same runner-scale-set + JIT model as ARC, so the GitHub App
+needs the following permissions:
+
+| Permission | Access | Reason |
+|-----------|--------|--------|
+| `administration` | **Read** | Read installation info; create / read runner scale sets (`_apis/runtime/runnerscalesets`) |
+| `organization_self_hosted_runners` | **Write** | Generate JIT runner configs (`.../generatejitconfig`), acquire job messages (`.../sessions`), and remove runner registrations |
+| `metadata` | Read | Standard minimum App permission (installations / repositories discovery) — usually present by default |
+
+**Install scope.** Install the app on an **organization** for the simplest
+setup (scale sets are org-scoped). The listener auto-detects App
+installations:
+- **Organization** installations use the org scope directly.
+- **User / personal** installations are expanded to per-repository scopes (the
+  runner-scale-set registration endpoint is org-based and 404s for personal
+  accounts).
+
+Note: unlike the legacy registration-token model, this app uses **JIT config**
+(`generatejitconfig`), so no `actions/runners/registration-token` permission is
+needed — the runner boots directly from a short-lived JIT token.
 
 ### Install
 
