@@ -143,7 +143,7 @@ type Scaler struct {
 func (s *Scaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error
 func (s *Scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error
 func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error)
-func (s *Scaler) Shutdown(ctx context.Context)  // graceful shutdown: kill all runners
+func (s *Scaler) Shutdown(ctx context.Context)  // graceful drain + force-kill on timeout
 ```
 
 **Responsibilities**: runner lifecycle management (launch, track, cleanup).
@@ -167,6 +167,26 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 ```
 
 Runners are tracked by `RunnerName` (the name specified when issuing the JIT Config). When `HandleJobCompleted` is called, the corresponding Runner process is cleaned up.
+
+### Graceful shutdown
+
+On `SIGTERM`/`SIGINT` the listener stops acquiring new jobs, then each `Scaler.Shutdown` runs a drain window (`runner.shutdown_grace_timeout`, default `10m`) so in-flight jobs can finish before the process exits. Without this drain the process would exit immediately and systemd would SIGKILL the whole cgroup — including any nspawn containers still running a job — losing the job (observed as GitHub's "lost communication" + `Container ... terminated by signal KILL`).
+
+```go
+func (s *Scaler) Shutdown(ctx context.Context)
+    // 1. Kick idle runners (not executing a job) so they drain promptly.
+    // 2. Wait for the tracked set to drain to zero (each runner's monitor
+    //    goroutine removes it on exit).
+    // 3. On ctx timeout, force-kill the remainder.
+```
+
+Drain semantics:
+
+- A runner is considered mid-job when `RunningJob()` is true — i.e. `Running job:` appears in its captured output. It is left alone and the monitor goroutine removes it once the job finishes.
+- An idle runner (not yet assigned / booted) is killed immediately; nothing is at stake.
+- The runner is detached from the signal context: `Launch` binds the `systemd-nspawn` child via `exec.CommandContext(context.WithoutCancel(ctx), ...)` so the transition into shutdown does not SIGKILL live containers. The drain is the only place runners are terminated.
+
+The packaged systemd unit sets `TimeoutStopSec=660` (i.e. > default `10m` grace + margin). If `runner.shutdown_grace_timeout` is raised, `TimeoutStopSec` must be raised to match, otherwise systemd SIGKILLs the cgroup before the drain completes.
 
 ### 3.3 Runner Launcher
 

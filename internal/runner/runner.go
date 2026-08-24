@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // runnerUID is the in-container uid of the `runner` user (uid 1001, matching
@@ -37,7 +38,27 @@ type Runner struct {
 	WorkspaceDir string
 
 	cmd    *exec.Cmd
-	output *bytes.Buffer
+	output *syncBuffer // mutex-protected so RunningJob can read while exec copies
+}
+
+// syncBuffer is a concurrency-safe in-memory byte buffer used to capture a
+// runner's combined stdout/stderr. os/exec writes into it from copy goroutines
+// while Scaler.Shutdown may read it (RunningJob) to decide whether to drain.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // Launch boots a runner in a systemd-nspawn container.
@@ -63,7 +84,12 @@ func Launch(ctx context.Context, r *Runner) error {
 		}
 	}
 	args := nspawnArgs(r)
-	cmd := exec.CommandContext(ctx, "systemd-nspawn", args...)
+	// Launch the container on a context that is unaffected by cancellation of
+	// the caller's context (e.g. the processor's SIGTERM shutdown context).
+	// If we bound the nspawn process to the signal-cancelled context,
+	// exec.CommandContext would SIGKILL the container mid-job the moment the
+	// process begins its graceful shutdown, losing in-flight jobs.
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), "systemd-nspawn", args...)
 	// Keep JIT config in the child environment too so any wrapper process the
 	// entrypoint spawns inherits it.
 	cmd.Env = append(cmd.Environ(),
@@ -71,10 +97,10 @@ func Launch(ctx context.Context, r *Runner) error {
 		"HOME=/home/runner",
 	)
 
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	r.output = &output
+	output := &syncBuffer{}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	r.output = output
 	r.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
@@ -149,6 +175,17 @@ func (r *Runner) Output() string {
 		return ""
 	}
 	return r.output.String()
+}
+
+// RunningJob reports whether the runner has started executing a job
+// ("Running job: ..." appears in its captured output) and has not yet exited.
+// Used during graceful shutdown to decide whether to drain (wait for an
+// in-flight job to finish) or tear down immediately.
+func (r *Runner) RunningJob() bool {
+	if r.output == nil {
+		return false
+	}
+	return strings.Contains(r.output.String(), "Running job:")
 }
 
 // Wait blocks until the runner exits.

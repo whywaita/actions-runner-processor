@@ -32,9 +32,37 @@ func TestIsWithin(t *testing.T) {
 func TestOutput(t *testing.T) {
 	t.Parallel()
 
-	r := &Runner{output: bytes.NewBufferString("runner diagnostic")}
+	r := &Runner{output: &syncBuffer{buf: *bytes.NewBufferString("runner diagnostic")}}
 	if got := r.Output(); got != "runner diagnostic" {
 		t.Fatalf("Output() = %q, want runner diagnostic", got)
+	}
+}
+
+func TestRunningJob(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"nil output", "", false},
+		{"empty output", "", false},
+		{"still booting listener", "Connected to GitHub\nListening for Jobs", false},
+		{"mid job", "Running job: test\ngo test ./...\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r *Runner
+			if tt.output == "" {
+				r = &Runner{output: nil}
+			} else {
+				r = &Runner{output: &syncBuffer{buf: *bytes.NewBufferString(tt.output)}}
+			}
+			if got := r.RunningJob(); got != tt.want {
+				t.Errorf("RunningJob() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

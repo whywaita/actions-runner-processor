@@ -108,16 +108,101 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 	return len(s.runners), nil
 }
 
-// Shutdown gracefully stops all runners.
-func (s *Scaler) Shutdown(_ context.Context) {
+// Shutdown gracefully stops all runners. The processor's per-runner monitor
+// goroutine (started in startRunner) already waits on each runner and removes
+// it from the tracked set the moment it exits -- so graceful shutdown is simply
+// "make idle runners exit now, then wait for the set to drain to zero".
+//
+// A runner that is currently executing a job (RunningJob) is left to finish
+// naturally; an idle runner is killed since nothing is at stake. If ctx expires
+// (the configured shutdown grace timeout) before the drain completes, the
+// remaining runners are force-killed. Waiting on the map (instead of calling
+// Wait() again) avoids double-Wait panics on the underlying exec.Cmd.
+func (s *Scaler) Shutdown(ctx context.Context) {
+	s.mu.Lock()
+	if len(s.runners) == 0 {
+		s.mu.Unlock()
+		s.logger.Info("shutting down", slog.Int("runners", 0))
+		return
+	}
+	runners := make([]*runner.Runner, 0, len(s.runners))
+	for _, r := range s.runners {
+		runners = append(runners, r)
+	}
+	s.mu.Unlock()
+
+	s.logger.Info("shutting down", slog.Int("runners", len(runners)))
+
+	// Kick any idle runners so they drain promptly; job-executing runners stay.
+	for _, r := range runners {
+		if !r.RunningJob() {
+			_ = r.Kill()
+		}
+	}
+
+	// Wait for the monitor goroutines to remove every runner, or until ctx
+	// expires and we force-kill the remainder.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		remaining := len(s.runners)
+		s.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			s.logger.Warn("shutdown grace timeout exceeded, force-killing remaining runners",
+				slog.Int("remaining", remaining))
+			s.forceKillAll()
+			// The monitor goroutines will pick up the kills and remove them.
+			s.waitDrain(ctx)
+			return
+		case <-ticker.C:
+		}
+	}
+
+	s.logger.Info("shutdown complete")
+}
+
+// forceKillAll kills every runner still tracked by the scaler.
+func (s *Scaler) forceKillAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.logger.Info("shutting down", slog.Int("runners", len(s.runners)))
 	for _, r := range s.runners {
 		_ = r.Kill()
 	}
+}
+
+// waitDrain blocks until every runner has been removed from the tracked set,
+// or ctx expires (whichever comes first), then clears the set.
+func (s *Scaler) waitDrain(ctx context.Context) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		remaining := len(s.runners)
+		s.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			// Give the monitor goroutines a moment to observe the kills before
+			// we clear the set and exit.
+			time.Sleep(1 * time.Second)
+			s.mu.Lock()
+			clear(s.runners)
+			s.mu.Unlock()
+			return
+		case <-ticker.C:
+		}
+	}
+	s.mu.Lock()
 	clear(s.runners)
+	s.mu.Unlock()
 }
 
 // MaxRunners returns the configured maximum.

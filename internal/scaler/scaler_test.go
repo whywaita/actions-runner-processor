@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/whywaita/actions-runner-processor/internal/runner"
@@ -91,5 +92,56 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 
 	if got := strings.Count(output.String(), `"msg":"scaling"`); got != 2 {
 		t.Fatalf("scaling log count = %d, want 2; output = %s", got, output.String())
+	}
+}
+
+func TestShutdownNoRunners(t *testing.T) {
+	t.Parallel()
+
+	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+
+	// Must return immediately and not hang when there is nothing tracked.
+	done := make(chan struct{})
+	go func() {
+		s.Shutdown(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown with no runners did not return")
+	}
+}
+
+func TestShutdownForceKillsOnExpiredContext(t *testing.T) {
+	t.Parallel()
+
+	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+
+	// Seed a runner that is idle (no output yet -> RunningJob() == false).
+	// Its cmd is nil, so Kill() is a no-op. With an already-cancelled context
+	// the grace loop must not spin forever: it force-kills and returns.
+	s.mu.Lock()
+	s.runners["runner-idle"] = &runner.Runner{Name: "runner-idle"}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.Shutdown(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown with expired context did not return")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.runners) != 0 {
+		t.Fatalf("runners not cleared after force-kill shutdown, len = %d", len(s.runners))
 	}
 }

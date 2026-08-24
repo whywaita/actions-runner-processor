@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,6 +40,14 @@ type RunnerConfig struct {
 	MaxRunners int    `yaml:"max_runners"`
 	MinRunners int    `yaml:"min_runners"`
 
+	// ShutdownGraceTimeout is how long the processor keeps running to let
+	// in-flight jobs finish after SIGTERM/SIGINT, before it force-kills the
+	// remaining runner containers. Preserving jobs across a restart is what
+	// makes the shutdown graceful -- without it, systemd SIGKILLs the whole
+	// cgroup (including nspawn children) the moment the process exits.
+	// Defaults to 10 minutes.
+	ShutdownGraceTimeout Duration `yaml:"shutdown_grace_timeout"`
+
 	// ImagePath is the root filesystem directory used as the custom runner
 	// image for nspawn mode (a debootstrap / custom-built rootfs with
 	// actions/runner preinstalled).
@@ -64,6 +73,26 @@ type MetricsConfig struct {
 type WebUIConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Addr    string `yaml:"addr"`
+}
+
+// Duration wraps time.Duration so YAML can unmarshal human-readable forms
+// such as "10m" or "90s".
+type Duration struct {
+	time.Duration
+}
+
+// UnmarshalYAML parses a duration string (e.g. "10m", "90s") into Duration.
+func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	d.Duration = v
+	return nil
 }
 
 // ResolveMaxRunners returns the effective max_runners (0 = NumCPU).
@@ -117,6 +146,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.Runner.WorkspacePath == "" {
 		cfg.Runner.WorkspacePath = "/opt/runner/workspaces"
+	}
+	if cfg.Runner.ShutdownGraceTimeout.Duration == 0 {
+		cfg.Runner.ShutdownGraceTimeout.Duration = 10 * time.Minute
 	}
 	if cfg.GitHub.APIURL == "" {
 		cfg.GitHub.APIURL = "https://api.github.com"

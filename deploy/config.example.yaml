@@ -9,6 +9,10 @@ scale_set_name: "actions-runner-processor"
 
 runner:
   version: "latest"                # actions/runner version (informational)
+  # How long to keep running on SIGTERM/SIGINT so in-flight jobs can finish
+  # before force-killing remaining runner containers. systemd TimeoutStopSec
+  # (in the packaged unit, default 660s) must be >= this value.
+  shutdown_grace_timeout: "10m"    # default 10m
   # Custom runner image (root filesystem directory). Booted read-only with an
   # ephemeral overlayed root; changes are discarded on exit.
   image_path: "/opt/runner/image"
