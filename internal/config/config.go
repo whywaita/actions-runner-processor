@@ -56,11 +56,11 @@ type RunnerConfig struct {
 	// that launches the runner. Defaults to /opt/actions-runner/run.sh.
 	Entrypoint string `yaml:"entrypoint"`
 	// WorkspacePath is the host directory (per-runner subdirectory) that is
-	// bind-mounted into the container at /opt/actions-runner/_work,
-	// /opt/actions-runner/_tool, and /home/runner (the runner user's home).
-	// It must live on real disk (not the volatile-overlay tmpfs) or job
-	// workspaces, toolchain caches, and home caches fill the RAM-backed
-	// overlay with ENOSPC. Defaults to /opt/runner/workspaces.
+	// bind-mounted into the container at /opt/actions-runner/_work so job
+	// artifacts are visible on the host and cleaned up after exit. With
+	// --ephemeral the rest of the container root is a real-disk btrfs CoW
+	// snapshot, so no bind is needed to avoid ENOSPC. Defaults to
+	// /opt/runner/workspaces.
 	WorkspacePath string `yaml:"workspace_path"`
 }
 

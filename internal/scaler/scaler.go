@@ -300,14 +300,17 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 	return nil
 }
 
-// removeWorkspace removes a runner's bind-mounted workspace and its _tool,
-// _diag, _temp, and home sibling directories from the host disk. Called
-// after the container has exited and the dirs are no longer in use.
+// removeWorkspace removes a runner's job-workspace directory from the host
+// disk after the container has exited and it is no longer in use. Under
+// --ephemeral the container root itself (a btrfs CoW snapshot) is discarded
+// by systemd-nspawn on exit, so only this host-mirrored workspace needs
+// removing here.
 func (s *Scaler) removeWorkspace(workspaceDir string) {
-	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp", workspaceDir + "-home"} {
-		if err := os.RemoveAll(dir); err != nil {
-			s.logger.Warn("failed to remove workspace", "dir", dir, "error", err.Error())
-		}
+	if workspaceDir == "" {
+		return
+	}
+	if err := os.RemoveAll(workspaceDir); err != nil {
+		s.logger.Warn("failed to remove workspace", "dir", workspaceDir, "error", err.Error())
 	}
 }
 

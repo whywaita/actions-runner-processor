@@ -13,12 +13,15 @@ runner:
   # before force-killing remaining runner containers. systemd TimeoutStopSec
   # (in the packaged unit, default 660s) must be >= this value.
   shutdown_grace_timeout: "10m"    # default 10m
-  # Custom runner image (root filesystem directory). Booted read-only with an
-  # ephemeral overlayed root; changes are discarded on exit.
+  # Custom runner image (root filesystem directory). Booted via --ephemeral:
+  # the image must be a btrfs subvolume so systemd-nspawn can CoW-snapshot it
+  # and discard the writable copy on exit (ext4 falls back to a full copy per
+  # job). The bundled host runs it from /opt/runner-btrfs/image.
   image_path: "/opt/runner/image"
-  # Host directory for per-runner workspace + tool cache, bind-mounted into the
-  # container at _work and _tool. Must be on real disk -- writing to the
-  # --volatile=overlay tmpfs fills the RAM-backed overlay with ENOSPC.
+  # Host directory for the per-runner job workspace, bind-mounted into the
+  # container at _work so job artifacts are visible on the host and cleaned up
+  # after exit. Everything else already lives on the real-disk CoW snapshot, so
+  # no cache bind is needed to avoid ENOSPC.
   workspace_path: "/opt/runner/workspaces"
   # Absolute path (inside the container) of the boot command.
   entrypoint: "/opt/actions-runner/run.sh"
