@@ -218,7 +218,7 @@ systemd-nspawn \
   --directory=/opt/runner-btrfs/image \                    # custom image (a btrfs subvolume)
   --ephemeral \                                        # CoW-snapshot root; discarded on exit
   --boot \                                             # systemd as PID1: systemctl/dockerd work
-  --network-zone=runner \                              # private netns (CAP_NET_ADMIN can't touch host)
+--network-zone=rn-<runner-id> \             # per-runner private bridge (isolated from host and other jobs)
   --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \            # dockerd: storage + netfilter (private netns)
   --bind-ro=/run/actions-runner-processor/${R_NAME}.jitconfig:/opt/actions-runner/.jitconfig \
   --machine="${R_NAME}" \
@@ -232,7 +232,7 @@ systemd-nspawn \
 ```
 
 - Custom image lives at `runner.image_path` (a btrfs subvolume, e.g. `/opt/runner-btrfs/image`). Built by `image/build-image.sh` (lightweight) or `image/build-image-full.sh` (full).
-- Networking: `--network-zone=runner` gives each runner a private network namespace on an nspawn-managed bridge; the host NATs the zone out (see `deploy/deploy.sh`) for outbound HTTPS only.
+- Networking: `--network-zone=rn-<runner-id>` gives each runner a private network namespace on its OWN nspawn-managed bridge (per-runner zone, so concurrent jobs can't reach each other over L2); the host NATs outbound HTTPS out (see `deploy/deploy.sh`).
 - resolv.conf is baked into the image with real resolvers (the old `--bind-ro=/etc/resolv.conf` would point at 127.0.0.53 = the container's own loopback in a private netns).
 - The runner boots as the `runner` user inside the container (passwordless sudo) → `sudo` works in job steps. systemd-nspawn itself runs as host root.
 - The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.

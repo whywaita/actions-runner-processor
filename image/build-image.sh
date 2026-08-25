@@ -175,7 +175,7 @@ Group=runner
 Environment=JITCONFIG_FILE=/opt/actions-runner/.jitconfig
 ExecStart=/opt/actions-runner/entrypoint.sh
 TimeoutStopSec=7200
-ExecStopPost=/usr/bin/systemctl poweroff
+ExecStopPost=+/usr/bin/systemctl poweroff
 
 [Install]
 WantedBy=multi-user.target

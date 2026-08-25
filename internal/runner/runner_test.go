@@ -99,7 +99,7 @@ func TestNspawnArgs(t *testing.T) {
 		"--directory=/opt/runner-btrfs/image",
 		"--ephemeral",
 		"--boot",
-		"--network-zone=runner",
+		"--network-zone=rn-eaa075e1",
 		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
 		"--machine=runner-eaa075e1",
 		"--bind-ro=/run/actions-runner-processor/runner-eaa075e1.jitconfig:/opt/actions-runner/.jitconfig",

@@ -151,13 +151,18 @@ func (r *Runner) cleanupJIT() {
 // the container's own netns, never the host. Outbound internet is provided by
 // host-side NAT. The JIT credential travels via a bind-mounted protected file,
 // never through argv.
+//
+// The zone name is derived from the runner name (not a shared static "runner"):
+// a fixed shared zone would attach every concurrent runner to the SAME bridge
+// (vz-runner), letting untrusted jobs reach each other over L2 even though they
+// have separate netns. A per-runner zone isolates each job on its own bridge.
 func nspawnArgs(r *Runner) []string {
 	args := []string{
 		"--quiet",
 		"--directory=" + r.ImagePath,
 		"--ephemeral",
 		"--boot",
-		"--network-zone=runner",
+		"--network-zone=" + zoneFor(r.Name),
 		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
 		"--machine=" + r.Name,
 	}
@@ -174,6 +179,19 @@ func nspawnArgs(r *Runner) []string {
 		args = append(args, "--bind-ro=/dev/null:"+path)
 	}
 	return args
+}
+
+// zoneFor returns a short, unique network-zone name for a runner. systemd-nspawn
+// names the zone's bridge "vz-" + zone; Linux interface names cap at 15 chars, so
+// a zone derived from the full runner name ("runner-<8 hex>") would exceed that
+// and break bridge creation. The runner name's trailing 8-hex id is unique per
+// job, so reuse it with a short "rn-" prefix (bridge "vz-rn-<id>", 14 chars).
+func zoneFor(name string) string {
+	id := name
+	if i := strings.LastIndexByte(name, '-'); i >= 0 && len(name)-i-1 == 8 {
+		id = name[i+1:]
+	}
+	return "rn-" + id
 }
 
 func isWithin(path, root string) bool {

@@ -19,7 +19,8 @@
 #   GITHUB_REPO=…    repo whose CI builds the image (default whywaita/actions-runner-processor)
 #   RUNNER_IMAGE_PATH=…  image subvolume path (default /opt/runner-btrfs/image)
 #   UPLINK=eth0      host egress interface for NAT (default: first default-route iface)
-#   ZONE=runner      nspawn network zone name (must match the binary's --network-zone)
+#   ZONE=runner      per-runner nspawn zones share the NAT/ip_forward (host NATs
+#                    all of them outbound; each runner gets its own bridge)
 #   DNS1/DNS2=…      resolvers baked/verified into the container resolv.conf
 #   BINARY_PATH=…    use a prebuilt binary instead of compiling
 #   SKIP_IMAGE=1     no image work (binary+network+config+restart only)
