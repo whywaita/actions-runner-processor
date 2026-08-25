@@ -301,10 +301,10 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 }
 
 // removeWorkspace removes a runner's bind-mounted workspace and its _tool,
-// _diag, _temp, and home-cache sibling directories from the host disk. Called
+// _diag, _temp, and home sibling directories from the host disk. Called
 // after the container has exited and the dirs are no longer in use.
 func (s *Scaler) removeWorkspace(workspaceDir string) {
-	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp", workspaceDir + "-cache"} {
+	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp", workspaceDir + "-home"} {
 		if err := os.RemoveAll(dir); err != nil {
 			s.logger.Warn("failed to remove workspace", "dir", dir, "error", err.Error())
 		}

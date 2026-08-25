@@ -158,16 +158,18 @@ func nspawnArgs(r *Runner) []string {
 // workspaceBindings maps the host workspace directories (created by
 // prepareWorkspace) to their in-container mount targets. The github-hosted
 // layout writes toolchain caches to _tool, runner diagnostics to _diag, job
-// temp scripts to _temp, and the runner user's home cache ($HOME/.cache --
-// where Go/Node/npm/pip put their build caches) to /home/runner/.cache -- all
-// must live on real disk or the RAM-backed overlay fills up with ENOSPC.
+// temp scripts to _temp, and the runner user's whole home directory (Go build
+// cache $HOME/.cache, npm cache $HOME/.npm, module cache $HOME/go/pkg/mod, pip
+// $HOME/.cache/pip, ...) to /home/runner -- all must live on real disk or the
+// RAM-backed overlay fills up with ENOSPC. Binding the entire home avoids the
+// whack-a-mole of inventing a new -<cache> sibling for every tool's cache dir.
 func workspaceBindings(workspaceDir string) map[string]string {
 	return map[string]string{
-		workspaceDir:            "/opt/actions-runner/_work",
-		workspaceDir + "-tool":  "/opt/actions-runner/_tool",
-		workspaceDir + "-diag":  "/opt/actions-runner/_diag",
-		workspaceDir + "-temp":  "/opt/actions-runner/_temp",
-		workspaceDir + "-cache": "/home/runner/.cache",
+		workspaceDir:           "/opt/actions-runner/_work",
+		workspaceDir + "-tool": "/opt/actions-runner/_tool",
+		workspaceDir + "-diag": "/opt/actions-runner/_diag",
+		workspaceDir + "-temp": "/opt/actions-runner/_temp",
+		workspaceDir + "-home": "/home/runner",
 	}
 }
 

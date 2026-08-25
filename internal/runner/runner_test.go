@@ -123,7 +123,7 @@ func TestNspawnArgs(t *testing.T) {
 		"/opt/runner/workspaces/runner-eaa075e1-tool:/opt/actions-runner/_tool",
 		"/opt/runner/workspaces/runner-eaa075e1-diag:/opt/actions-runner/_diag",
 		"/opt/runner/workspaces/runner-eaa075e1-temp:/opt/actions-runner/_temp",
-		"/opt/runner/workspaces/runner-eaa075e1-cache:/home/runner/.cache",
+		"/opt/runner/workspaces/runner-eaa075e1-home:/home/runner",
 	}
 	gotBinds := make([]string, 0)
 	for i := 0; i < len(args); i++ {
@@ -198,7 +198,7 @@ func TestPrepareWorkspace(t *testing.T) {
 		t.Fatalf("prepareWorkspace() error = %v", err)
 	}
 
-	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp", workspaceDir + "-cache"} {
+	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp", workspaceDir + "-home"} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("stat %s: %v", dir, err)
