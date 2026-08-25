@@ -34,7 +34,7 @@ func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeScaleSetClient{jitRunnerID: 42}
-	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
+	s := New(client, 1, 1, 0, nil, "/srv/image")
 	s.launch = func(context.Context, *runner.Runner) error {
 		return errors.New("launch failed")
 	}
@@ -52,7 +52,7 @@ func TestStartRunnerSetsImageAndEntrypoint(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeScaleSetClient{jitRunnerID: 7}
-	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
+	s := New(client, 1, 1, 0, nil, "/srv/image")
 
 	var got *runner.Runner
 	s.launch = func(_ context.Context, r *runner.Runner) error {
@@ -66,9 +66,6 @@ func TestStartRunnerSetsImageAndEntrypoint(t *testing.T) {
 	if got.ImagePath != "/srv/image" {
 		t.Errorf("ImagePath = %q, want /srv/image", got.ImagePath)
 	}
-	if got.Entrypoint != "/opt/actions-runner/run.sh" {
-		t.Errorf("Entrypoint = %q, want /opt/actions-runner/run.sh", got.Entrypoint)
-	}
 	if got.JITConfig != "jit-config" || got.Name == "" {
 		t.Errorf("runner fields not populated: %+v", got)
 	}
@@ -78,7 +75,7 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 	t.Parallel()
 
 	var output bytes.Buffer
-	s := New(nil, 1, 0, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
+	s := New(nil, 1, 0, 0, nil, "/srv/image")
 	s.logger = slog.New(slog.NewJSONHandler(&output, nil))
 
 	for _, count := range []int{0, 0, 1, 1, 0, 1} {
@@ -95,7 +92,7 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 func TestHandleJobStartedMarksBusy(t *testing.T) {
 	t.Parallel()
 
-	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
+	s := New(nil, 1, 1, 0, nil, "/srv/image")
 	r := &runner.Runner{Name: "runner-busy"}
 	s.mu.Lock()
 	s.runners["runner-busy"] = r
@@ -122,7 +119,7 @@ func TestHandleJobStartedMarksBusy(t *testing.T) {
 func TestShutdownNoRunners(t *testing.T) {
 	t.Parallel()
 
-	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
+	s := New(nil, 1, 1, 0, nil, "/srv/image")
 
 	// Must return immediately and not hang when there is nothing tracked.
 	done := make(chan struct{})
@@ -140,7 +137,7 @@ func TestShutdownNoRunners(t *testing.T) {
 func TestShutdownForceKillsOnExpiredContext(t *testing.T) {
 	t.Parallel()
 
-	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
+	s := New(nil, 1, 1, 0, nil, "/srv/image")
 
 	// Seed a runner that is idle (no output yet -> RunningJob() == false).
 	// Its cmd is nil, so Kill() is a no-op. With an already-cancelled context

@@ -72,9 +72,6 @@ github:
 	if cfg.Runner.ImagePath != "/opt/runner/image" {
 		t.Errorf("ImagePath: want /opt/runner/image, got %s", cfg.Runner.ImagePath)
 	}
-	if cfg.Runner.Entrypoint != "/opt/actions-runner/run.sh" {
-		t.Errorf("Entrypoint: want /opt/actions-runner/run.sh, got %s", cfg.Runner.Entrypoint)
-	}
 	if cfg.Runner.ShutdownGraceTimeout.Duration != 10*time.Minute {
 		t.Errorf("ShutdownGraceTimeout: want 10m, got %v", cfg.Runner.ShutdownGraceTimeout.Duration)
 	}

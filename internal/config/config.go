@@ -52,9 +52,6 @@ type RunnerConfig struct {
 	// image for nspawn mode (a debootstrap / custom-built rootfs with
 	// actions/runner preinstalled).
 	ImagePath string `yaml:"image_path"`
-	// Entrypoint is the absolute path (inside the container) of the command
-	// that launches the runner. Defaults to /opt/actions-runner/run.sh.
-	Entrypoint string `yaml:"entrypoint"`
 }
 
 // MetricsConfig holds Prometheus exporter settings.
@@ -134,9 +131,6 @@ func Load() (*Config, error) {
 	// default path reachable from the deploy layout.
 	if cfg.Runner.ImagePath == "" {
 		cfg.Runner.ImagePath = "/opt/runner/image"
-	}
-	if cfg.Runner.Entrypoint == "" {
-		cfg.Runner.Entrypoint = "/opt/actions-runner/run.sh"
 	}
 	if cfg.Runner.ShutdownGraceTimeout.Duration == 0 {
 		cfg.Runner.ShutdownGraceTimeout.Duration = 10 * time.Minute

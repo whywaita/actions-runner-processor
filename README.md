@@ -46,9 +46,10 @@ ephemeral runners inside [systemd-nspawn](https://systemd.io/) containers.
 ```bash
 apt install systemd-container
 
-# Build a custom runner image (root filesystem) and place it at /opt/runner/image.
-# The image must contain actions/runner preinstalled at /opt/actions-runner
-# (the default entrypoint is /opt/actions-runner/run.sh).
+# Build a custom runner image (root filesystem) and place it at /opt/runner/image
+# (or a btrfs subvolume — see below). The image must contain actions/runner
+# preinstalled at /opt/actions-runner and a systemd unit that boots it; the
+# bundled image/build-*.sh scripts bake this in.
 ```
 
 ### Building a custom runner image
@@ -66,8 +67,8 @@ apt install systemd-container
 
 | Component | Where | Notes |
 |---|---|---|
-| Minimal Debian/Ubuntu base | `/` | `debootstrap --variant=minbase`; no systemd as PID1 (booted `--as-pid2` in an ephemeral overlay) |
-| `actions/runner` binary | `/opt/actions-runner` | The container entrypoint `/opt/actions-runner/run.sh` boots a JIT-configured listener |
+| Minimal Debian/Ubuntu base | `/` | `debootstrap --variant=minbase`; booted with **systemd as PID 1** (`--boot`) so `systemctl` works in jobs |
+| `actions/runner` binary | `/opt/actions-runner` | Booted by a baked `actions-runner.service` (via `/opt/actions-runner/entrypoint.sh`) that reads the JIT config and runs the official `run.sh` |
 | Extra apt packages | `/usr` | `build-essential`, git, curl, jq, python3, `sudo`, etc. — declared in `image.yaml`, baked in so jobs don't install them per run |
 | Dedicated `runner` user | uid 1001, `/home/runner` | Passwordless sudo, mirrors the GitHub-hosted layout |
 
@@ -136,8 +137,7 @@ github:
 scale_set_name: "actions-runner-processor"
 
 runner:
-  image_path: "/opt/runner/image"                  # custom runner image rootfs
-  entrypoint: "/opt/actions-runner/run.sh"         # in-container boot command
+  image_path: "/opt/runner-btrfs/image"            # custom runner image (btrfs subvolume rootfs)
   max_runners: 4                                   # 0 = runtime.NumCPU()
   min_runners: 0                                   # warm idle runners
   # How long to keep running on SIGTERM/SIGINT so in-flight jobs finish before
@@ -282,21 +282,23 @@ Each runner is booted in a `systemd-nspawn` container:
 
 ```bash
 systemd-nspawn \
-  --directory=/opt/runner/image \      # custom image (a btrfs subvolume)
-  --ephemeral \                         # CoW-snapshotted root; changes discarded on exit
-  --as-pid2 \                           # run entrypoint as PID 2
-  --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=<jit> \
-  --machine=runner-<name> \
-  --bind-ro=/etc/resolv.conf \
-  /opt/actions-runner/run.sh
+  --directory=/opt/runner-btrfs/image \   # custom image (a btrfs subvolume)
+  --ephemeral \                            # CoW-snapshotted root; changes discarded on exit
+  --boot \                                 # systemd as PID1: systemctl/dockerd work in jobs
+  --network-zone=runner \                  # private netns; isolated from host network admin
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \   # dockerd (safe: netns is private)
+  --bind-ro=/run/actions-runner-processor/runner-<name>.jitconfig:/opt/actions-runner/.jitconfig \
+  --machine=runner-<name>
 ```
 
 > `--ephemeral` CoW-snapshots the image directory onto real disk, boots the writable snapshot, and discards it on exit — so job writes (including `sudo apt install` into `/usr`) never touch a RAM overlay and can't hit `ENOSPC`. For this to be cheap, the image must be a **btrfs subvolume** (ext4 directories fall back to a full copy). The bundled host runs it from `/opt/runner-btrfs/image` (a loopback btrfs filesystem mounted at boot); set `runner.image_path` accordingly.
 
-- **Custom image** — the image directory is the base (lower) layer.
-- **Ephemeral** — all writes go to a private overlay layer discarded on exit, so jobs can `apt install` and mutate `/usr` without affecting other jobs or the host.
-- **Network** — shares the host network namespace (no `--private-network`), so the runner reaches GitHub over outbound HTTPS only.
-- **sudo** — the runner boots as the `runner` user (GitHub layout); passwordless sudo makes `sudo` work as expected in job steps.
+> **Privacy / DNS / networking**: the container is booted with `--boot` so job steps can `systemctl start docker`. `--network-zone=runner` puts it in its own network namespace on an nspawn-managed private bridge; the host NATs the zone out (see `deploy/deploy.sh`), and the image bakes a real `resolv.conf` (the old host `--bind-ro=/etc/resolv.conf` would point at the container's own loopback). The JIT credential is passed via a ro bind-mounted root-only file, never on the command line.
+
+- **Custom image** — the image directory is a btrfs subvolume (the base, CoW layer).
+- **Ephemeral** — each job boots a disposable CoW snapshot discarded on exit, so jobs can `apt install` and mutate `/usr` without affecting other jobs or the host.
+- **Network** — `--network-zone` gives each runner a private network namespace on an nspawn-managed bridge; the host NATs it out for outbound HTTPS. `CAP_NET_ADMIN`/`CAP_SYS_ADMIN` (for dockerd) can only touch the runner's own netns.
+- **sudo** — the runner boots (via the baked `actions-runner.service`) as the `runner` user (GitHub layout); passwordless sudo makes `sudo` work as expected in job steps.
 - The configuration file and GitHub App private key are masked with `/dev/null` inside the sandbox.
 - Runner registrations are removed by ID whenever a runner process exits, including startup failures.
 

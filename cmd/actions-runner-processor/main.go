@@ -154,7 +154,6 @@ func main() {
 				cfg.Runner.MinRunners,
 				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
 				cfg.Runner.ImagePath,
-				cfg.Runner.Entrypoint,
 			)
 			registry.Register(inst.Scope, s)
 			webRegistry.Register(inst.Scope, s)

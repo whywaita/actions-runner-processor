@@ -217,22 +217,23 @@ R_NAME="runner-$(uuidgen | cut -c1-8)"
 systemd-nspawn \
   --directory=/opt/runner/image \                    # custom image (a btrfs subvolume)
   --ephemeral \                                        # CoW-snapshot root; discarded on exit
-  --as-pid2 \                                          # run entrypoint as PID 2
-  --user=runner \                                      # boot runner process as `runner` (sudo available)
-  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \            # dockerd: storage + netfilter (iptables bridge)
-  --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=... \
+  --boot \                                             # systemd as PID1: systemctl/dockerd work
+  --network-zone=runner \                              # private netns (CAP_NET_ADMIN can't touch host)
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \            # dockerd: storage + netfilter (private netns)
+  --bind-ro=/run/actions-runner-processor/${R_NAME}.jitconfig:/opt/actions-runner/.jitconfig \
   --machine="${R_NAME}" \
-  --bind-ro=/etc/resolv.conf \
-  --bind-ro=/etc/hosts \
   --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
-  --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem \
-  /opt/actions-runner/run.sh
+  --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem
 
-# On job completion, just Kill(); systemd-nspawn cleans up the overlay and container
+# The baked actions-runner.service (systemd oneshot) runs entrypoint.sh, which
+# pulls ACTIONS_RUNNER_INPUT_JITCONFIG from the protected .jitconfig file, then
+# runs the official /opt/actions-runner/run.sh. When the job ends the runner
+# exits, the unit powers off, and --ephemeral discards the snapshot.
 ```
 
-- Custom image lives at `/opt/runner/image` on the host (`runner.image_path`). Built by `image/build-image.sh` (lightweight) or `image/build-image-full.sh` (full).
-- Networking is shared with the host (no `--private-network`) → only outbound HTTPS to reach GitHub.
+- Custom image lives at `runner.image_path` (a btrfs subvolume, e.g. `/opt/runner-btrfs/image`). Built by `image/build-image.sh` (lightweight) or `image/build-image-full.sh` (full).
+- Networking: `--network-zone=runner` gives each runner a private network namespace on an nspawn-managed bridge; the host NATs the zone out (see `deploy/deploy.sh`) for outbound HTTPS only.
+- resolv.conf is baked into the image with real resolvers (the old `--bind-ro=/etc/resolv.conf` would point at 127.0.0.53 = the container's own loopback in a private netns).
 - The runner boots as the `runner` user inside the container (passwordless sudo) → `sudo` works in job steps. systemd-nspawn itself runs as host root.
 - The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.
 - When a runner process exits, its GitHub registration is removed using the runner ID from the JIT response.
@@ -259,22 +260,23 @@ PRs/pushes and `workflow_dispatch`.
 **What the lightweight image contains:**
 
 - A minimal Debian/Ubuntu base (`debootstrap --variant=minbase`), booted with
-  `--as-pid2` in an ephemeral overlay (no systemd as PID1 needed).
-- The `actions/runner` binary at `/opt/actions-runner`, with the container
-  entrypoint `/opt/actions-runner/run.sh` booting a JIT-configured listener.
+  **systemd as PID 1** (`--boot`) so `systemctl` works inside job steps.
+- The `actions/runner` binary at `/opt/actions-runner`, booted by the baked
+  `actions-runner.service` (via `/opt/actions-runner/entrypoint.sh`) that reads
+  the JIT config and runs the official `run.sh`.
 - The extra apt packages declared in `image/image.yaml` (build tools, runtime
   deps), baked in so jobs don't install them per run.
 - A dedicated `runner` user (uid 1001, home `/home/runner`, passwordless sudo)
-  mirroring the GitHub-hosted layout. `launchNspawn` boots the container with
-  `--user=runner`, so the runner process and job steps run as this user and
-  `sudo` works inside jobs. `/opt/actions-runner` and `/home/runner` are owned
-  by `runner`.
+  mirroring the GitHub-hosted layout. The baked unit runs the entrypoint as
+  this user, so the runner process and job steps run as `runner` and `sudo`
+  works inside jobs. `/opt/actions-runner` and `/home/runner` are owned by
+  `runner`.
 
 **Full (option A)** — `image/build-image-full.sh` produces a
 GitHub-hosted-compatible toolset. `actions/runner-images` is built by running
 `images/ubuntu/scripts/build/*.sh` in order (its Packer templates are just a
 loop over these shell scripts), so this script debootstraps a base, boots it
-in a `systemd-nspawn` container (`--as-pid2`), and runs the same build scripts
+in a `systemd-nspawn` container (`--boot`), and runs the same build scripts
 directly inside with the repo bind-mounted. **No LXD or Packer is needed.**
 Heavy (~1h, 50GB+), gated on `workflow_dispatch` → Type: **full**.
 
@@ -427,8 +429,8 @@ github:
 scale_set_name: "runner-listener"  # Scale Set name shared across all installations
 
 runner:
-  image_path: "/opt/runner/image"  # custom runner image (btrfs subvolume rootfs)
-  entrypoint: "/opt/actions-runner/run.sh"  # in-container boot command
+  image_path: "/opt/runner-btrfs/image"  # custom runner image (btrfs subvolume rootfs)
+  shutdown_grace_timeout: "10m"          # drain in-flight jobs on SIGTERM
   version: "latest"                # actions/runner version (informational)
 
 metrics:

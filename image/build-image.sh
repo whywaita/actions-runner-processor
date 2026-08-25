@@ -122,6 +122,70 @@ chroot "$ROOTFS" /bin/bash -c "
 mkdir -p "$ROOTFS/opt/actions-runner/_diag" "$ROOTFS/opt/actions-runner/_work"
 chown -R 1001:1001 "$ROOTFS/opt/actions-runner"
 
+# --- systemd-boot runtime (--boot): runner unit + JIT entrypoint + private-net DNS ---
+# The container boots with systemd as PID 1 so job steps can `systemctl start
+# docker`, and systemd-networkd DHCPs the private-netns host0 veth.
+echo ">>> bake systemd runtime (--boot): runner.service + entrypoint + networkd"
+mkdir -p "$ROOTFS/etc/systemd/network" "$ROOTFS/etc/systemd/system/multi-user.target.wants"
+
+# systemd-networkd: DHCP on the nspawn host0 veth under --network-zone.
+cat > "$ROOTFS/etc/systemd/network/10-host0.network" <<'NF'
+[Match]
+Name=host0
+
+[Network]
+DHCP=ipv4
+NF
+
+# Disable systemd-resolved so it does not clobber the bind-mounted /etc/resolv.conf.
+rm -f "$ROOTFS/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+ln -sf /dev/null "$ROOTFS/etc/systemd/system/systemd-resolved.service"
+
+# Deterministic DNS: in a private netns the old host bind-ro /etc/resolv.conf
+# would point at 127.0.0.53 (the container's own loopback), so bake real
+# resolvers that reach the internet via the host NAT instead. $ROOTFS/etc/hosts
+# already provides localhost via the finalize step below.
+rm -f "$ROOTFS/etc/resolv.conf"
+printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > "$ROOTFS/etc/resolv.conf"
+
+# entrypoint: pull the JIT config from the protected bind-mounted file
+# (argv-free) and run the official runner run.sh.
+cat > "$ROOTFS/opt/actions-runner/entrypoint.sh" <<'EP'
+#!/bin/bash
+set -euo pipefail
+if [[ -n "${JITCONFIG_FILE:-}" && -f "${JITCONFIG_FILE}" ]]; then
+  export ACTIONS_RUNNER_INPUT_JITCONFIG="$(cat "${JITCONFIG_FILE}")"
+fi
+exec /opt/actions-runner/run.sh
+EP
+chmod 755 "$ROOTFS/opt/actions-runner/entrypoint.sh"
+
+# actions-runner.service: one job per container; powers off (tears down nspawn)
+# when the runner exits.
+cat > "$ROOTFS/etc/systemd/system/actions-runner.service" <<'UN'
+[Unit]
+Description=GitHub Actions runner (single job)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=runner
+Group=runner
+Environment=JITCONFIG_FILE=/opt/actions-runner/.jitconfig
+ExecStart=/opt/actions-runner/entrypoint.sh
+TimeoutStopSec=7200
+ExecStopPost=/usr/bin/systemctl poweroff
+
+[Install]
+WantedBy=multi-user.target
+UN
+
+# Enable networkd + the runner unit (symlinks work in both chroot and --boot).
+ln -sf /lib/systemd/system/systemd-networkd.service "$ROOTFS/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -sf /etc/systemd/system/actions-runner.service "$ROOTFS/etc/systemd/system/multi-user.target.wants/actions-runner.service"
+chown -R 1001:1001 "$ROOTFS/opt/actions-runner"
+
 echo ">>> finalize /etc/hosts"
 chroot "$ROOTFS" /bin/bash -c "
   printf '127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n' > /etc/hosts

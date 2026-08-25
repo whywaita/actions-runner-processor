@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -88,24 +89,20 @@ func TestNspawnArgs(t *testing.T) {
 		Name:        "runner-eaa075e1",
 		JITConfig:   "some-jit-config",
 		ImagePath:   "/opt/runner/image",
-		Entrypoint:  "/opt/actions-runner/run.sh",
 		MaskedPaths: []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
 	}
 	args := nspawnArgs(r)
 
-	// The nspawn argument list (excluding the trailing entrypoint) is
-	// order-sensitive; verify it positionally.
+	// The argument list is order-sensitive; verify it positionally.
 	wantPrefix := []string{
 		"--quiet",
 		"--directory=/opt/runner/image",
 		"--ephemeral",
-		"--as-pid2",
-		"--user=runner",
+		"--boot",
+		"--network-zone=runner",
 		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
-		"--setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=some-jit-config",
 		"--machine=runner-eaa075e1",
-		"--bind-ro=/etc/resolv.conf",
-		"--bind-ro=/etc/hosts",
+		"--bind-ro=/run/actions-runner-processor/runner-eaa075e1.jitconfig:/opt/actions-runner/.jitconfig",
 		"--bind-ro=/dev/null:/etc/actions-runner-processor/config.yaml",
 	}
 	for i := range wantPrefix {
@@ -114,18 +111,19 @@ func TestNspawnArgs(t *testing.T) {
 		}
 	}
 
-	// No writable --bind should ever be emitted now: with --ephemeral the whole
-	// root (including the job workspace /opt/actions-runner/_work) is a
-	// discarded real-disk CoW snapshot.
+	// No writable --bind and no credential on argv: with --ephemeral the whole
+	// root (including /opt/actions-runner/_work) is a discarded real-disk CoW
+	// snapshot, and the JIT secret travels via the bind-mounted protected file.
 	for _, a := range args {
 		if a == "--bind" {
 			t.Fatalf("unexpected writable --bind in args: %v", args)
 		}
-	}
-
-	// Entrypoint must remain the last arg.
-	if args[len(args)-1] != "/opt/actions-runner/run.sh" {
-		t.Fatalf("entrypoint must remain the last arg, got: %v", args)
+		if strings.HasPrefix(a, "--setenv=") {
+			t.Fatalf("JIT credential must not be passed on argv, got --setenv: %v", args)
+		}
+		if a == "/opt/actions-runner/run.sh" || a == "/opt/actions-runner/entrypoint.sh" {
+			t.Fatalf("entrypoint must not be passed as an arg (baked systemd unit runs it): %v", args)
+		}
 	}
 
 	// The /home/secret.pem masked path is outside /etc and must be skipped, and
@@ -137,6 +135,26 @@ func TestNspawnArgs(t *testing.T) {
 		}
 		if a == "/home/secret.pem" {
 			t.Errorf("non-/etc path leaked into args: %v", args)
+		}
+	}
+}
+
+func TestNspawnArgsNoJIT(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{
+		Name:      "runner-eaa075e1",
+		JITConfig: "",
+		ImagePath: "/opt/runner/image",
+	}
+	args := nspawnArgs(r)
+
+	for _, a := range args {
+		if strings.Contains(a, ".jitconfig") {
+			t.Fatalf("no JIT bind expected when JITConfig is empty, got: %v", args)
+		}
+		if strings.HasPrefix(a, "--setenv=") {
+			t.Fatalf("no --setenv expected when JITConfig is empty, got: %v", args)
 		}
 	}
 }
