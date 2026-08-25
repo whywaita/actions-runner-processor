@@ -212,6 +212,12 @@ for ln in src:
     # "metrics:", so image_path was appended under the wrong section and
     # silently ignored.
     if in_runner and ln.strip() and not ln.startswith(" "):
+        # Insert runner.image_path before leaving the section, otherwise an
+        # existing config that lacks image_path would never get it added (the
+        # runner would fall back to the wrong default image).
+        if not have:
+            out.append('  image_path: "%s"' % img)
+            have = True
         in_runner = False
     if not in_runner:
         out.append(ln); continue

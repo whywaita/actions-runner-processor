@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // runnerUID is the in-container uid of the `runner` user (uid 1001, matching
@@ -47,6 +48,13 @@ type Runner struct {
 	// shutdown can reliably tell an in-flight runner apart from an idle one even
 	// before the "Running job:" line is flushed.
 	busy atomic.Bool
+
+	// startedAt records when the container launched. Used by graceful shutdown
+	// to give a runner a short "assignment grace" window: right after launch a
+	// runner may have accepted a job whose JobStarted has not been processed
+	// yet, in which case both busy and output are unset and it must not be
+	// killed as idle.
+	startedAt time.Time
 }
 
 // syncBuffer is a concurrency-safe in-memory byte buffer used to capture a
@@ -108,7 +116,17 @@ func Launch(ctx context.Context, r *Runner) error {
 		r.cleanupJIT()
 		return fmt.Errorf("systemd-nspawn start: %w", err)
 	}
+	r.startedAt = time.Now()
 	return nil
+}
+
+// AssignmentGraceElapsed reports whether a runner's job-assignment state can be
+// trusted. Within the grace window after launch, a runner may have accepted a
+// job whose JobStarted has not been processed yet (both busy and captured
+// output are still unset), so it must not be classified as idle. Graceful
+// shutdown uses this before killing an idle-looking runner.
+func (r *Runner) AssignmentGraceElapsed(grace time.Duration) bool {
+	return !r.startedAt.IsZero() && time.Since(r.startedAt) >= grace
 }
 
 // writeJITFile persists the encoded JIT config to a root-only file (mode 0600,

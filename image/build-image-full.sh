@@ -59,8 +59,16 @@ if [[ -d "$WORK/runner-images" ]]; then
 fi
 git clone --quiet --depth 1 "https://github.com/actions/runner-images" "$WORK/runner-images"
 if [[ "$RUNNER_IMAGES_REF" != "latest" ]]; then
-  git -C "$WORK/runner-images" fetch --quiet --depth 1 origin "tag/${RUNNER_IMAGES_REF}" 2>/dev/null \
-    || git -C "$WORK/runner-images" checkout --quiet "$RUNNER_IMAGES_REF"
+  # A depth-1 clone of the default branch won't contain the requested ref, and
+  # fetching only "tag/<ref>" doesn't move HEAD. Fetch the tag and/or branch
+  # explicitly, then check it out by name so a pinned build builds the
+  # requested ref instead of failing or silently using the default branch.
+  git -C "$WORK/runner-images" fetch --quiet --depth 1 origin \
+      "refs/tags/$RUNNER_IMAGES_REF:refs/tags/$RUNNER_IMAGES_REF" \
+      "refs/heads/$RUNNER_IMAGES_REF:refs/heads/$RUNNER_IMAGES_REF" \
+      2>/dev/null \
+    || { echo "error: could not fetch runner-images ref '$RUNNER_IMAGES_REF'" >&2; exit 1; }
+  git -C "$WORK/runner-images" checkout --quiet "$RUNNER_IMAGES_REF"
 fi
 
 echo ">>> debootstrap base ($RELEASE, $CODENAME, $ARCH)"
@@ -546,6 +554,13 @@ UN
 ln -sf /lib/systemd/system/systemd-networkd.service "$RT/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
 ln -sf /etc/systemd/system/actions-runner.service "$RT/etc/systemd/system/multi-user.target.wants/actions-runner.service"
 chown -R 1001:1001 "$RT/opt/actions-runner"
+
+# Remove the one-shot provisioning unit before archiving: runner-provision.sh
+# existed only as a build-time bind mount, so from the exported image the
+# service would start with a missing ExecStart and leave systemd degraded on
+# every boot (which fails workflow health checks).
+rm -f "$RT/etc/systemd/system/multi-user.target.wants/runner-provision.service"
+rm -f "$RT/etc/systemd/system/runner-provision.service"
 
 TARBALL="$OUTPUT_DIR/actions-runner-image-full-${ARCH}.tar.gz"
 tar -czf "$TARBALL" -C "$WORK/rootfs" .
