@@ -5,9 +5,9 @@
 # /opt/runner-btrfs/image).
 #
 # WHAT THIS IMAGE IS / CONTAINS
-#   - A minimal Debian/Ubuntu base (debootstrap --variant=minbase, so no
-#     systemd as PID1; the container is booted with --as-pid2 in an ephemeral
-#     overlay).
+#   - A minimal Debian/Ubuntu base (debootstrap --variant=minbase) with
+#     systemd + systemd-sysv installed so systemd-nspawn --boot works (the
+#     runner is launched with --boot to make `systemctl` usable in job steps).
 #   - The official actions/runner binary at /opt/actions-runner (the container
 #     entrypoint /opt/actions-runner/run.sh boots a JIT-configured listener).
 #   - Any apt packages you declare below (build tools, runtime deps), baked in
@@ -18,7 +18,11 @@
 #     this user and `sudo` works inside jobs.
 #
 # On the host, the rootfs tarball is expanded to runner.image_path and booted
-# read-only with an ephemeral overlay; per-job writes are discarded on exit.
+# with --ephemeral; per-job writes are discarded on exit.
+#
+# The image must be a btrfs subvolume (see config.example.yaml and deploy.sh)
+# so systemd-nspawn --ephemeral CoW-snapshots it; on a plain directory it
+# falls back to a full copy per job (slow but functional).
 
 # Base distribution for debootstrap. Must be a Debian/Ubuntu release
 # (e.g. "ubuntu:noble" for Ubuntu 24.04 or "debian:trixie").
@@ -41,6 +45,12 @@ entrypoint: "/opt/actions-runner/run.sh"
 # runtime dependencies sqlite3, curl, git, jq). Add your build tools here
 # rather than installing them per job.
 packages:
+  # systemd + systemd-sysv are REQUIRED: the container is booted with
+  # systemd-nspawn --boot, which needs systemd as PID1 inside the image so
+  # `systemctl` works in job steps. debootstrap --variant=minbase excludes
+  # them, so install explicitly here.
+  - systemd
+  - systemd-sysv
   - build-essential
   - curl
   - git

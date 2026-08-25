@@ -103,7 +103,10 @@ ensure_binary() {
   fi
   local built_sha=""
   if [[ -n "${BINARY_PATH:-}" && -f "$BINARY_PATH" ]]; then
-    built_sha="$(sha256sum "$BINARY_PATH" | awk '{print $1}')"
+    log "   installing supplied binary from $BINARY_PATH"
+    cp "$BINARY_PATH" "$BINARY.tmp"
+    mv "$BINARY.tmp" "$BINARY"; chmod 755 "$BINARY"
+    built_sha="$(sha256sum "$BINARY" | awk '{print $1}')"
   elif [[ -d "$REPO_ROOT/cmd/actions-runner-processor" ]]; then
     command -v go >/dev/null 2>&1 || die "go not installed; build the binary and pass BINARY_PATH=, or install go"
     log "   building $BINARY from $REPO_ROOT"
@@ -203,7 +206,11 @@ for ln in src:
     if ln.rstrip() == "runner:":
         in_runner = True
         out.append(ln); continue
-    if in_runner and not ln[:2].strip() and not ln.startswith(" "):
+    # End the runner section at the next non-indented, non-blank (top-level)
+    # key. Previously the condition never matched top-level keys like
+    # "metrics:", so image_path was appended under the wrong section and
+    # silently ignored.
+    if in_runner and ln.strip() and not ln.startswith(" "):
         in_runner = False
     if not in_runner:
         out.append(ln); continue
@@ -214,6 +221,18 @@ if in_runner and not have:
     out.append('  image_path: "%s"' % img)
 open(p, "w").write("\n".join(out) + "\n")
 PY
+}
+
+# ---------------------------------------------------------------------------
+# 4b. Install the systemd unit (source deployments only). The packaged .deb
+# handles this via postinst; a fresh host flow of deploy.sh never had it, so
+# `systemctl restart "$SERVICE"` would fail with unit-not-found.
+# ---------------------------------------------------------------------------
+ensure_unit() {
+  local src="$SCRIPT_DIR/actions-runner-processor.service"
+  [[ -f "$src" ]] || die "systemd unit not found: $src"
+  install -m 0644 "$src" "/etc/systemd/system/$SERVICE"
+  log "installed systemd unit $SERVICE"
 }
 
 # ---------------------------------------------------------------------------
@@ -235,6 +254,7 @@ restart_service() {
 main() {
   ensure_network
   ensure_binary
+  ensure_unit
   ensure_image
   ensure_config
   restart_service

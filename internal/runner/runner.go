@@ -101,6 +101,11 @@ func Launch(ctx context.Context, r *Runner) error {
 	r.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
+		// cleanupJIT normally runs from Wait (on a successful launch). If
+		// systemd-nspawn cannot start, Wait is never reached, so remove the
+		// credential file here to avoid leaking runner credentials under
+		// /run/actions-runner-processor across repeated launch failures.
+		r.cleanupJIT()
 		return fmt.Errorf("systemd-nspawn start: %w", err)
 	}
 	return nil
