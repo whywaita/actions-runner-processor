@@ -485,6 +485,68 @@ echo ">>> export rootfs"
 rm -rf "$WORK/rootfs/proc" "$WORK/rootfs/sys"
 mkdir -p "$WORK/rootfs/proc" "$WORK/rootfs/sys"
 
+# --- bake systemd-boot runtime (--boot): runner.service + JIT entrypoint + private-net DNS ---
+# The container boots with systemd as PID 1 so job steps can `systemctl start`
+# dockerd; systemd-networkd DHCPs the private-netns host0 veth.
+echo ">>> bake systemd runtime (--boot): runner.service + entrypoint + networkd"
+RT="$WORK/rootfs"
+mkdir -p "$RT/etc/systemd/network" "$RT/etc/systemd/system/multi-user.target.wants"
+
+cat > "$RT/etc/systemd/network/10-host0.network" <<'NF'
+[Match]
+Name=host0
+
+[Network]
+DHCP=ipv4
+NF
+
+# Deterministic DNS: in a private netns we cannot point resolv.conf at the host
+# (127.0.0.53 is the container's own loopback); bake real resolvers that reach
+# the internet through the host NAT. Mask systemd-resolved so it doesn't clobber
+# this file.
+rm -f "$RT/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+ln -sf /dev/null "$RT/etc/systemd/system/systemd-resolved.service"
+rm -f "$RT/etc/resolv.conf"
+printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > "$RT/etc/resolv.conf"
+
+# entrypoint: pull the JIT config from the protected bind-mounted file
+# (argv-free) and run the official runner run.sh.
+cat > "$RT/opt/actions-runner/entrypoint.sh" <<'EP'
+#!/bin/bash
+set -euo pipefail
+if [[ -n "${JITCONFIG_FILE:-}" && -f "${JITCONFIG_FILE}" ]]; then
+  export ACTIONS_RUNNER_INPUT_JITCONFIG="$(cat "${JITCONFIG_FILE}")"
+fi
+exec /opt/actions-runner/run.sh
+EP
+chmod 755 "$RT/opt/actions-runner/entrypoint.sh"
+
+# actions-runner.service: one job per container; powers off (tears down nspawn)
+# when the runner exits.
+cat > "$RT/etc/systemd/system/actions-runner.service" <<'UN'
+[Unit]
+Description=GitHub Actions runner (single job)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=runner
+Group=runner
+Environment=JITCONFIG_FILE=/opt/actions-runner/.jitconfig
+ExecStart=/opt/actions-runner/entrypoint.sh
+TimeoutStopSec=7200
+ExecStopPost=/usr/bin/systemctl poweroff
+
+[Install]
+WantedBy=multi-user.target
+UN
+
+# Enable networkd + the runner unit.
+ln -sf /lib/systemd/system/systemd-networkd.service "$RT/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -sf /etc/systemd/system/actions-runner.service "$RT/etc/systemd/system/multi-user.target.wants/actions-runner.service"
+chown -R 1001:1001 "$RT/opt/actions-runner"
+
 TARBALL="$OUTPUT_DIR/actions-runner-image-full-${ARCH}.tar.gz"
 tar -czf "$TARBALL" -C "$WORK/rootfs" .
 

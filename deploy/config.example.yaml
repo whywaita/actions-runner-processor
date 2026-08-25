@@ -17,9 +17,7 @@ runner:
   # the image must be a btrfs subvolume so systemd-nspawn can CoW-snapshot it
   # and discard the writable copy on exit (ext4 falls back to a full copy per
   # job). The bundled host runs it from /opt/runner-btrfs/image.
-  image_path: "/opt/runner/image"
-  # Absolute path (inside the container) of the boot command.
-  entrypoint: "/opt/actions-runner/run.sh"
+  image_path: "/opt/runner-btrfs/image"
   max_runners: 0                   # 0 = NumCPU
   min_runners: 0
 

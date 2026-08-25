@@ -29,8 +29,7 @@ type Scaler struct {
 	minRunners  int
 	maskedPaths []string
 
-	imagePath  string
-	entrypoint string
+	imagePath string
 
 	launch launchRunnerFunc
 
@@ -41,7 +40,7 @@ type Scaler struct {
 }
 
 // New creates a new Scaler.
-func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPaths []string, imagePath, entrypoint string) *Scaler {
+func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPaths []string, imagePath string) *Scaler {
 	return &Scaler{
 		client:      client,
 		scaleSetID:  scaleSetID,
@@ -49,7 +48,6 @@ func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPa
 		minRunners:  minRunners,
 		maskedPaths: maskedPaths,
 		imagePath:   imagePath,
-		entrypoint:  entrypoint,
 		launch:      runner.Launch,
 		runners:     make(map[string]*runner.Runner),
 		logger:      slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
@@ -249,7 +247,6 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 		JITConfig:   jit.EncodedJITConfig,
 		MaskedPaths: s.maskedPaths,
 		ImagePath:   s.imagePath,
-		Entrypoint:  s.entrypoint,
 	}
 
 	if err := s.launch(ctx, r); err != nil {

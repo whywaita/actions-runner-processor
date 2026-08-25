@@ -6,12 +6,28 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 )
+
+// runnerUID is the in-container uid of the `runner` user (uid 1001, matching
+// the GitHub-hosted/image layout). The protected JIT-config file is chowned to
+// this uid so the container's entrypoint (which runs as `runner`) can read it.
+const runnerUID = 1001
+
+// jitDir is a root-only tmpfs directory holding one per-runner JIT config file
+// (mode 0600). The file is bind-mounted read-only into the container instead of
+// being passed on the systemd-nspawn argv, so the short-lived runner
+// registration credential is never visible in /proc/<pid>/cmdline.
+const jitDir = "/run/actions-runner-processor"
+
+func jitFilePath(name string) string {
+	return filepath.Join(jitDir, name+".jitconfig")
+}
 
 // Runner represents a running ephemeral runner instance.
 type Runner struct {
@@ -67,6 +83,9 @@ func (b *syncBuffer) String() string {
 // CAP_SYS_ADMIN covers storage/mount namespaces, CAP_NET_ADMIN the netfilter
 // (iptables) bridge network driver.
 func Launch(ctx context.Context, r *Runner) error {
+	if err := writeJITFile(r); err != nil {
+		return err
+	}
 	args := nspawnArgs(r)
 	// Launch the container on a context that is unaffected by cancellation of
 	// the caller's context (e.g. the processor's SIGTERM shutdown context).
@@ -74,12 +93,6 @@ func Launch(ctx context.Context, r *Runner) error {
 	// exec.CommandContext would SIGKILL the container mid-job the moment the
 	// process begins its graceful shutdown, losing in-flight jobs.
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), "systemd-nspawn", args...)
-	// Keep JIT config in the child environment too so any wrapper process the
-	// entrypoint spawns inherits it.
-	cmd.Env = append(cmd.Environ(),
-		"ACTIONS_RUNNER_INPUT_JITCONFIG="+r.JITConfig,
-		"HOME=/home/runner",
-	)
 
 	output := &syncBuffer{}
 	cmd.Stdout = output
@@ -93,20 +106,58 @@ func Launch(ctx context.Context, r *Runner) error {
 	return nil
 }
 
+// writeJITFile persists the encoded JIT config to a root-only file (mode 0600,
+// chown'd to the container's `runner` uid so the in-image entrypoint can read
+// it). Launching with this file bound read-only into the container keeps the
+// credential off the process argv.
+func writeJITFile(r *Runner) error {
+	if r.JITConfig == "" {
+		return nil
+	}
+	if err := os.MkdirAll(jitDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", jitDir, err)
+	}
+	p := jitFilePath(r.Name)
+	if err := os.WriteFile(p, []byte(r.JITConfig), 0o600); err != nil {
+		return fmt.Errorf("write jit config: %w", err)
+	}
+	if err := os.Chown(p, runnerUID, runnerUID); err != nil {
+		return fmt.Errorf("chown jit config: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) cleanupJIT() {
+	if r.JITConfig == "" {
+		return
+	}
+	_ = os.Remove(jitFilePath(r.Name))
+}
+
 // nspawnArgs builds the systemd-nspawn argument list for a runner. Extracted
 // from Launch so the arg assembly can be unit-tested.
+//
+// The container is booted with systemd as PID 1 (--boot): this makes
+// `systemctl` usable inside job steps (so the full image's dockerd can be
+// started with `systemctl start docker`) and gives the private network
+// namespace a working DHCP client (systemd-networkd). --network-zone puts the
+// runner in its own network namespace on a private nspawn-managed bridge, so
+// the granted CAP_NET_ADMIN/CAP_SYS_ADMIN (needed by dockerd) can only affect
+// the container's own netns, never the host. Outbound internet is provided by
+// host-side NAT. The JIT credential travels via a bind-mounted protected file,
+// never through argv.
 func nspawnArgs(r *Runner) []string {
 	args := []string{
 		"--quiet",
 		"--directory=" + r.ImagePath,
 		"--ephemeral",
-		"--as-pid2",
-		"--user=runner",
+		"--boot",
+		"--network-zone=runner",
 		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
-		"--setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=" + r.JITConfig,
 		"--machine=" + r.Name,
-		"--bind-ro=/etc/resolv.conf",
-		"--bind-ro=/etc/hosts",
+	}
+	if r.JITConfig != "" {
+		args = append(args, "--bind-ro="+jitFilePath(r.Name)+":/opt/actions-runner/.jitconfig")
 	}
 	for _, path := range r.MaskedPaths {
 		if !isWithin(path, "/etc") {
@@ -117,7 +168,6 @@ func nspawnArgs(r *Runner) []string {
 		// treat the bare destination path as the in-container command to run.
 		args = append(args, "--bind-ro=/dev/null:"+path)
 	}
-	args = append(args, r.Entrypoint)
 	return args
 }
 
@@ -163,7 +213,9 @@ func (r *Runner) Wait() error {
 	if r.cmd == nil {
 		return nil
 	}
-	return r.cmd.Wait()
+	err := r.cmd.Wait()
+	r.cleanupJIT()
+	return err
 }
 
 // Kill terminates the runner process tree.
