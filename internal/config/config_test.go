@@ -75,9 +75,6 @@ github:
 	if cfg.Runner.Entrypoint != "/opt/actions-runner/run.sh" {
 		t.Errorf("Entrypoint: want /opt/actions-runner/run.sh, got %s", cfg.Runner.Entrypoint)
 	}
-	if cfg.Runner.WorkspacePath != "/opt/runner/workspaces" {
-		t.Errorf("WorkspacePath: want /opt/runner/workspaces, got %s", cfg.Runner.WorkspacePath)
-	}
 	if cfg.Runner.ShutdownGraceTimeout.Duration != 10*time.Minute {
 		t.Errorf("ShutdownGraceTimeout: want 10m, got %v", cfg.Runner.ShutdownGraceTimeout.Duration)
 	}

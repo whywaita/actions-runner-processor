@@ -2,8 +2,6 @@ package runner
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -87,22 +85,20 @@ func TestNspawnArgs(t *testing.T) {
 	t.Parallel()
 
 	r := &Runner{
-		Name:         "runner-eaa075e1",
-		JITConfig:    "some-jit-config",
-		ImagePath:    "/opt/runner/image",
-		Entrypoint:   "/opt/actions-runner/run.sh",
-		MaskedPaths:  []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
-		WorkspaceDir: "/opt/runner/workspaces/runner-eaa075e1",
+		Name:        "runner-eaa075e1",
+		JITConfig:   "some-jit-config",
+		ImagePath:   "/opt/runner/image",
+		Entrypoint:  "/opt/actions-runner/run.sh",
+		MaskedPaths: []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
 	}
 	args := nspawnArgs(r)
 
-	// Prefix args (before the workspace binds) are order-sensitive; verify them
-	// positionally, then check the workspace binds as an unordered set because
-	// they come from a map.
+	// The nspawn argument list (excluding the trailing entrypoint) is
+	// order-sensitive; verify it positionally.
 	wantPrefix := []string{
 		"--quiet",
 		"--directory=/opt/runner/image",
-		"--volatile=overlay",
+		"--ephemeral",
 		"--as-pid2",
 		"--user=runner",
 		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
@@ -118,33 +114,12 @@ func TestNspawnArgs(t *testing.T) {
 		}
 	}
 
-	wantBinds := []string{
-		"/opt/runner/workspaces/runner-eaa075e1:/opt/actions-runner/_work",
-		"/opt/runner/workspaces/runner-eaa075e1-tool:/opt/actions-runner/_tool",
-		"/opt/runner/workspaces/runner-eaa075e1-diag:/opt/actions-runner/_diag",
-		"/opt/runner/workspaces/runner-eaa075e1-temp:/opt/actions-runner/_temp",
-		"/opt/runner/workspaces/runner-eaa075e1-home:/home/runner",
-	}
-	gotBinds := make([]string, 0)
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--bind" {
-			gotBinds = append(gotBinds, args[i+1])
-			i++
-		}
-	}
-	if len(gotBinds) != len(wantBinds) {
-		t.Fatalf("got %d workspace binds: %v, want %d: %v", len(gotBinds), gotBinds, len(wantBinds), wantBinds)
-	}
-	for _, wb := range wantBinds {
-		found := false
-		for _, gb := range gotBinds {
-			if gb == wb {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("missing workspace bind %q in %v", wb, gotBinds)
+	// No writable --bind should ever be emitted now: with --ephemeral the whole
+	// root (including the job workspace /opt/actions-runner/_work) is a
+	// discarded real-disk CoW snapshot.
+	for _, a := range args {
+		if a == "--bind" {
+			t.Fatalf("unexpected writable --bind in args: %v", args)
 		}
 	}
 
@@ -162,49 +137,6 @@ func TestNspawnArgs(t *testing.T) {
 		}
 		if a == "/home/secret.pem" {
 			t.Errorf("non-/etc path leaked into args: %v", args)
-		}
-	}
-}
-
-func TestNspawnArgsNoWorkspace(t *testing.T) {
-	t.Parallel()
-
-	r := &Runner{
-		Name:       "runner-eaa075e1",
-		JITConfig:  "some-jit-config",
-		ImagePath:  "/opt/runner/image",
-		Entrypoint: "/opt/actions-runner/run.sh",
-	}
-	args := nspawnArgs(r)
-
-	for _, a := range args {
-		if a == "--bind" {
-			t.Fatalf("no workspace bind expected when WorkspaceDir is empty, got: %v", args)
-		}
-	}
-	if args[len(args)-1] != "/opt/actions-runner/run.sh" {
-		t.Fatalf("entrypoint must remain the last arg, got: %v", args)
-	}
-}
-
-func TestPrepareWorkspace(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("chown to uid 1001 requires root")
-	}
-
-	base := t.TempDir()
-	workspaceDir := filepath.Join(base, "ws")
-	if err := prepareWorkspace(workspaceDir); err != nil {
-		t.Fatalf("prepareWorkspace() error = %v", err)
-	}
-
-	for _, dir := range []string{workspaceDir, workspaceDir + "-tool", workspaceDir + "-diag", workspaceDir + "-temp", workspaceDir + "-home"} {
-		fi, err := os.Stat(dir)
-		if err != nil {
-			t.Fatalf("stat %s: %v", dir, err)
-		}
-		if !fi.IsDir() {
-			t.Errorf("%s is not a directory", dir)
 		}
 	}
 }

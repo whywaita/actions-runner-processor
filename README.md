@@ -282,14 +282,16 @@ Each runner is booted in a `systemd-nspawn` container:
 
 ```bash
 systemd-nspawn \
-  --directory=/opt/runner/image \      # custom image (read-only lower)
-  --volatile=overlay \                 # ephemeral overlay root (changes discarded on exit)
-  --as-pid2 \                          # run entrypoint as PID 2
+  --directory=/opt/runner/image \      # custom image (a btrfs subvolume)
+  --ephemeral \                         # CoW-snapshotted root; changes discarded on exit
+  --as-pid2 \                           # run entrypoint as PID 2
   --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=<jit> \
   --machine=runner-<name> \
   --bind-ro=/etc/resolv.conf \
   /opt/actions-runner/run.sh
 ```
+
+> `--ephemeral` CoW-snapshots the image directory onto real disk, boots the writable snapshot, and discards it on exit — so job writes (including `sudo apt install` into `/usr`) never touch a RAM overlay and can't hit `ENOSPC`. For this to be cheap, the image must be a **btrfs subvolume** (ext4 directories fall back to a full copy). The bundled host runs it from `/opt/runner-btrfs/image` (a loopback btrfs filesystem mounted at boot); set `runner.image_path` accordingly.
 
 - **Custom image** — the image directory is the base (lower) layer.
 - **Ephemeral** — all writes go to a private overlay layer discarded on exit, so jobs can `apt install` and mutate `/usr` without affecting other jobs or the host.

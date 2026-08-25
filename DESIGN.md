@@ -95,7 +95,7 @@ It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://
 | Auth | GitHub App (installation token) | Existing policy. Safer than PAT, scope-limited |
 | Sandbox | systemd-nspawn | Isolated container from a custom rootfs image. Ephemeral CoW root |
 | Custom Image | directory rootfs (`/opt/runner/image`) | Lightweight (debootstrap) or full (systemd-nspawn + runner-images scripts) built by `image/build-*.sh`, baked in CI. Writable during job (sudo) |
-| Ephemeral Root | `--volatile=overlay` | Image as read-only lower; writes land on an overlay discarded on exit |
+| Ephemeral Root | `--ephemeral` | Image (a btrfs subvolume) is CoW-snapshotted onto real disk; the writable snapshot is discarded on exit |
 | Runner | `actions/runner` (official) | No `--once --ephemeral` needed. Boot from JIT Config mode |
 | Process Manager | systemd | Auto-start on reboot, log management |
 | Metrics | `prometheus/client_golang` | Prometheus exporter |
@@ -207,18 +207,18 @@ func (r *Runner) Kill() error
 
 **systemd-nspawn launch command**:
 
-`ImagePath` (a custom rootfs directory) is booted as a read-only lower layer, and all job writes land on a private overlay injected via `--volatile=overlay`. This overlay is automatically discarded when the container exits, so a job can freely rewrite `/usr` with e.g. `sudo apt install` without affecting other jobs or the host.
+`ImagePath` (a custom rootfs directory) is booted via `--ephemeral`: systemd-nspawn CoW-snapshots the directory onto real disk, the container runs against the writable snapshot, and the snapshot is discarded when the container exits. A job can freely rewrite `/usr` with e.g. `sudo apt install` without affecting other jobs or the host.
 
-> **Disk note**: `--volatile=overlay` keeps the writable overlay on a RAM-backed tmpfs (≈ 25% of host RAM by default; `TMPFS_LIMITS_ROOTFS`). Toolchain downloads / extraction (`actions/setup-go`, `setup-node`), the runner's own diagnostic logs / temp scratch, and the runner user's home build cache (`$HOME/.cache` — where Go/Node/npm/pip cache) all write hundreds of MB and easily exhaust this tmpfs with `ENOSPC: no space left on device` even when the host disk is nearly empty. To avoid this, the job workspace (`/opt/actions-runner/_work`), tool cache (`_tool`), diagnostic dir (`_diag`), temp scratch (`_temp`), and the runner home cache (`/home/runner/.cache`) are all bind-mounted onto real host disk at `runner.workspace_path` (default `/opt/runner/workspaces`, a per-runner subdirectory). The processor creates and chowns these dirs to the container's `runner` uid (1001) before boot, and removes them when the runner exits. Note that this bind set is a judgement call: any tool that writes large data outside these paths (e.g. `sudo apt-get install` into `/usr`) still consumes the limited RAM-backed upper layer.
+> **Why btrfs**: systemd-nspawn's `--ephemeral` makes a cheap CoW snapshot only when the image directory is a **btrfs subvolume**; on ext4 (or a plain btrfs directory) it falls back to a full recursive copy of the image per job. Since the image root lands on real disk (not a RAM tmpfs), job writes (toolchain caches, the runner home, `sudo apt install` into `/usr`) can never exhaust a small overlay with `ENOSPC`. The bundled host stores the image at `runner.image_path` (`/opt/runner-btrfs/image`) inside a boot-mounted loopback btrfs filesystem; `--ephemeral` writes `machine.<rand>` snapshot dirs next to it in the btrfs and discards them automatically on exit. No host bind is used today — the job workspace (`/opt/actions-runner/_work`) lives inside the discarded snapshot too, so there is no host-side workspace dir to bind or clean up.
 
 ```bash
 # Boot a runner per job in an nspawn container
 R_NAME="runner-$(uuidgen | cut -c1-8)"
 systemd-nspawn \
-  --directory=/opt/runner/image \                    # custom image (read-only lower)
-  --volatile=overlay \                                # ephemeral overlay root (discarded)
-  --as-pid2 \                                         # run entrypoint as PID 2
-  --user=runner \                                     # boot runner process as `runner` (sudo available)
+  --directory=/opt/runner/image \                    # custom image (a btrfs subvolume)
+  --ephemeral \                                        # CoW-snapshot root; discarded on exit
+  --as-pid2 \                                          # run entrypoint as PID 2
+  --user=runner \                                      # boot runner process as `runner` (sudo available)
   --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \            # dockerd: storage + netfilter (iptables bridge)
   --setenv=ACTIONS_RUNNER_INPUT_JITCONFIG=... \
   --machine="${R_NAME}" \
@@ -226,8 +226,6 @@ systemd-nspawn \
   --bind-ro=/etc/hosts \
   --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
   --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem \
-  --bind "/opt/runner/workspaces/${R_NAME}:/opt/actions-runner/_work" \
-  --bind "/opt/runner/workspaces/${R_NAME}-tool:/opt/actions-runner/_tool" \
   /opt/actions-runner/run.sh
 
 # On job completion, just Kill(); systemd-nspawn cleans up the overlay and container
@@ -429,9 +427,8 @@ github:
 scale_set_name: "runner-listener"  # Scale Set name shared across all installations
 
 runner:
-  image_path: "/opt/runner/image"  # custom runner image (rootfs directory)
+  image_path: "/opt/runner/image"  # custom runner image (btrfs subvolume rootfs)
   entrypoint: "/opt/actions-runner/run.sh"  # in-container boot command
-  workspace_path: "/opt/runner/workspaces"  # per-runner work/tool dirs on real disk (avoids ENOSPC)
   version: "latest"                # actions/runner version (informational)
 
 metrics:
@@ -472,7 +469,7 @@ The same `maxRunners` / `minRunners` apply across all Installations. Runners onl
 | Threat | Countermeasure |
 |--------|---------------|
 | Cross-job access | systemd-nspawn container (PID, IPC, UTS, mount namespace isolation). The runner is the `runner` user inside the container (passwordless sudo), in a separate namespace from the host |
-| Job mutating host files | Custom image is a read-only lower; writes go to the `--volatile=overlay` ephemeral upper. Discarded on job exit |
+| Job mutating host files | Custom image is CoW-snapshotted via `--ephemeral`; the writable snapshot is discarded on job exit |
 | Runner process lingering | systemd-nspawn container terminated via `Kill()`. The ephemeral overlay is discarded at the same time |
 | Credential leak | GitHub App private key chmod 600 and masked inside the sandbox. JIT Config is one-time use |
 | Network-based attack | Host network shared (outbound only). Only the necessary connections are possible |

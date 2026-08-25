@@ -155,7 +155,6 @@ func main() {
 				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
 				cfg.Runner.ImagePath,
 				cfg.Runner.Entrypoint,
-				cfg.Runner.WorkspacePath,
 			)
 			registry.Register(inst.Scope, s)
 			webRegistry.Register(inst.Scope, s)
