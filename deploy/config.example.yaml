@@ -18,11 +18,6 @@ runner:
   # and discard the writable copy on exit (ext4 falls back to a full copy per
   # job). The bundled host runs it from /opt/runner-btrfs/image.
   image_path: "/opt/runner/image"
-  # Host directory for the per-runner job workspace, bind-mounted into the
-  # container at _work so job artifacts are visible on the host and cleaned up
-  # after exit. Everything else already lives on the real-disk CoW snapshot, so
-  # no cache bind is needed to avoid ENOSPC.
-  workspace_path: "/opt/runner/workspaces"
   # Absolute path (inside the container) of the boot command.
   entrypoint: "/opt/actions-runner/run.sh"
   max_runners: 0                   # 0 = NumCPU

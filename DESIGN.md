@@ -209,7 +209,7 @@ func (r *Runner) Kill() error
 
 `ImagePath` (a custom rootfs directory) is booted via `--ephemeral`: systemd-nspawn CoW-snapshots the directory onto real disk, the container runs against the writable snapshot, and the snapshot is discarded when the container exits. A job can freely rewrite `/usr` with e.g. `sudo apt install` without affecting other jobs or the host.
 
-> **Why btrfs**: systemd-nspawn's `--ephemeral` makes a cheap CoW snapshot only when the image directory is a **btrfs subvolume**; on ext4 (or a plain btrfs directory) it falls back to a full recursive copy of the image per job. Since the image root lands on real disk (not a RAM tmpfs), job writes (toolchain caches, the runner home, `sudo apt install` into `/usr`) can never exhaust a small overlay with `ENOSPC`. The bundled host stores the image at `runner.image_path` (`/opt/runner-btrfs/image`) inside a boot-mounted loopback btrfs filesystem; `--ephemeral` writes `machine.<rand>` snapshot dirs next to it in the btrfs and discards them automatically on exit. Only a single host bind is used today — the job workspace (`/opt/actions-runner/_work`) at `runner.workspace_path`, so job artifacts stay visible on the host and are cleaned up by the scaler on exit.
+> **Why btrfs**: systemd-nspawn's `--ephemeral` makes a cheap CoW snapshot only when the image directory is a **btrfs subvolume**; on ext4 (or a plain btrfs directory) it falls back to a full recursive copy of the image per job. Since the image root lands on real disk (not a RAM tmpfs), job writes (toolchain caches, the runner home, `sudo apt install` into `/usr`) can never exhaust a small overlay with `ENOSPC`. The bundled host stores the image at `runner.image_path` (`/opt/runner-btrfs/image`) inside a boot-mounted loopback btrfs filesystem; `--ephemeral` writes `machine.<rand>` snapshot dirs next to it in the btrfs and discards them automatically on exit. No host bind is used today — the job workspace (`/opt/actions-runner/_work`) lives inside the discarded snapshot too, so there is no host-side workspace dir to bind or clean up.
 
 ```bash
 # Boot a runner per job in an nspawn container
@@ -226,8 +226,6 @@ systemd-nspawn \
   --bind-ro=/etc/hosts \
   --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
   --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem \
-  --bind "/opt/runner/workspaces/${R_NAME}:/opt/actions-runner/_work" \
-  --bind "/opt/runner/workspaces/${R_NAME}-tool:/opt/actions-runner/_tool" \
   /opt/actions-runner/run.sh
 
 # On job completion, just Kill(); systemd-nspawn cleans up the overlay and container
@@ -429,9 +427,8 @@ github:
 scale_set_name: "runner-listener"  # Scale Set name shared across all installations
 
 runner:
-  image_path: "/opt/runner/image"  # custom runner image (rootfs directory)
+  image_path: "/opt/runner/image"  # custom runner image (btrfs subvolume rootfs)
   entrypoint: "/opt/actions-runner/run.sh"  # in-container boot command
-  workspace_path: "/opt/runner/workspaces"  # per-runner work/tool dirs on real disk (avoids ENOSPC)
   version: "latest"                # actions/runner version (informational)
 
 metrics:

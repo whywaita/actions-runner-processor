@@ -6,19 +6,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 )
-
-// runnerUID is the in-container uid of the `runner` user (uid 1001, matching
-// the GitHub-hosted/image layout) that runs job steps. Bind-mounted host
-// workspace directories must be owned by this uid so the container runner
-// (which runs as uid 1001) can write into them.
-const runnerUID = 1001
 
 // Runner represents a running ephemeral runner instance.
 type Runner struct {
@@ -28,15 +21,6 @@ type Runner struct {
 
 	ImagePath  string // root filesystem directory (custom image)
 	Entrypoint string // absolute path (in-container) of the boot command
-
-	// WorkspaceDir is the host directory bind-mounted into the container at
-	// /opt/actions-runner/_work so job artifacts stay visible on the host and
-	// are cleaned up by the scaler after exit. With --ephemeral the container
-	// boots from a real-disk btrfs CoW snapshot, so everything else (tool chain
-	// caches, the runner user's home, sudo apt installs into /usr) already lands
-	// on real disk and needs no bind to avoid ENOSPC. Empty string disables the
-	// bind.
-	WorkspaceDir string
 
 	cmd    *exec.Cmd
 	output *syncBuffer // mutex-protected so RunningJob can read while exec copies
@@ -83,14 +67,6 @@ func (b *syncBuffer) String() string {
 // CAP_SYS_ADMIN covers storage/mount namespaces, CAP_NET_ADMIN the netfilter
 // (iptables) bridge network driver.
 func Launch(ctx context.Context, r *Runner) error {
-	// Create and prepare the host workspace dirs before booting the container.
-	// The bind source must exist and be writable by the container's `runner`
-	// user (uid 1001). The processor runs as root, so chown works here.
-	if r.WorkspaceDir != "" {
-		if err := prepareWorkspace(r.WorkspaceDir); err != nil {
-			return fmt.Errorf("prepare workspace: %w", err)
-		}
-	}
 	args := nspawnArgs(r)
 	// Launch the container on a context that is unaffected by cancellation of
 	// the caller's context (e.g. the processor's SIGTERM shutdown context).
@@ -141,55 +117,13 @@ func nspawnArgs(r *Runner) []string {
 		// treat the bare destination path as the in-container command to run.
 		args = append(args, "--bind-ro=/dev/null:"+path)
 	}
-	// Bind the job workspace onto real host disk so job artifacts stay visible
-	// locally and are cleaned up by the scaler after the runner exits. Under
-	// --ephemeral the container root is a real-disk btrfs CoW snapshot, so the
-	// rest of the system (toolchain caches, /usr apt installs, the runner user's
-	// home) already lands on real disk and the old _tool/_diag/_temp/home-cache
-	// ENOSPC binds are unnecessary. Only bind when a WorkspaceDir is configured.
-	if r.WorkspaceDir != "" {
-		for hostDir, containerDir := range workspaceBindings(r.WorkspaceDir) {
-			args = append(args, "--bind", hostDir+":"+containerDir)
-		}
-	}
 	args = append(args, r.Entrypoint)
 	return args
-}
-
-// workspaceBindings maps the host workspace directory (created by
-// prepareWorkspace) to its in-container mount target. With --ephemeral the
-// whole container root is a real-disk btrfs CoW snapshot that is discarded on
-// exit, so every write (toolchain cache, runner user's home, sudo apt install
-// into /usr) already hits real disk and can never exhaust a RAM overlay with
-// ENOSPC. The only bind kept is the job workspace (_work), so job artifacts
-// are visible on the host for debugging and mirrored into the host-side
-// cleanup path after exit.
-func workspaceBindings(workspaceDir string) map[string]string {
-	return map[string]string{
-		workspaceDir: "/opt/actions-runner/_work",
-	}
 }
 
 func isWithin(path, root string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-// prepareWorkspace creates the host job-workspace directory that is
-// bind-mounted into the container at /opt/actions-runner/_work, and chowns it
-// to the container's `runner` user (uid 1001). The container runner writes job
-// workspaces into this dir, which must therefore exist and be runner-owned
-// before the container boots.
-func prepareWorkspace(workspaceDir string) error {
-	for dir := range workspaceBindings(workspaceDir) {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
-		}
-		if err := os.Chown(dir, runnerUID, runnerUID); err != nil {
-			return fmt.Errorf("chown %s: %w", dir, err)
-		}
-	}
-	return nil
 }
 
 // Output returns the captured stdout and stderr from the runner process.

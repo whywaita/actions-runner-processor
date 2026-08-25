@@ -6,8 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -31,9 +29,8 @@ type Scaler struct {
 	minRunners  int
 	maskedPaths []string
 
-	imagePath     string
-	entrypoint    string
-	workspacePath string
+	imagePath  string
+	entrypoint string
 
 	launch launchRunnerFunc
 
@@ -44,19 +41,18 @@ type Scaler struct {
 }
 
 // New creates a new Scaler.
-func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPaths []string, imagePath, entrypoint, workspacePath string) *Scaler {
+func New(client scaleSetClient, scaleSetID, maxRunners, minRunners int, maskedPaths []string, imagePath, entrypoint string) *Scaler {
 	return &Scaler{
-		client:        client,
-		scaleSetID:    scaleSetID,
-		maxRunners:    maxRunners,
-		minRunners:    minRunners,
-		maskedPaths:   maskedPaths,
-		imagePath:     imagePath,
-		entrypoint:    entrypoint,
-		workspacePath: workspacePath,
-		launch:        runner.Launch,
-		runners:       make(map[string]*runner.Runner),
-		logger:        slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
+		client:      client,
+		scaleSetID:  scaleSetID,
+		maxRunners:  maxRunners,
+		minRunners:  minRunners,
+		maskedPaths: maskedPaths,
+		imagePath:   imagePath,
+		entrypoint:  entrypoint,
+		launch:      runner.Launch,
+		runners:     make(map[string]*runner.Runner),
+		logger:      slog.Default().With("component", "scaler", "scaleSetID", scaleSetID),
 	}
 }
 
@@ -249,12 +245,11 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 	runnerID := int64(jit.Runner.ID)
 
 	r := &runner.Runner{
-		Name:         name,
-		JITConfig:    jit.EncodedJITConfig,
-		MaskedPaths:  s.maskedPaths,
-		ImagePath:    s.imagePath,
-		Entrypoint:   s.entrypoint,
-		WorkspaceDir: filepath.Join(s.workspacePath, name),
+		Name:        name,
+		JITConfig:   jit.EncodedJITConfig,
+		MaskedPaths: s.maskedPaths,
+		ImagePath:   s.imagePath,
+		Entrypoint:  s.entrypoint,
 	}
 
 	if err := s.launch(ctx, r); err != nil {
@@ -288,30 +283,9 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 		delete(s.runners, name)
 		s.mu.Unlock()
 
-		// Remove the bind-mounted workspace + tool dirs now that the container has
-		// exited and they are no longer in use. These live on real disk and would
-		// otherwise accumulate per runner.
-		if r.WorkspaceDir != "" {
-			s.removeWorkspace(r.WorkspaceDir)
-		}
-
 		s.removeRunnerRegistration(ctx, runnerID, name)
 	}()
 	return nil
-}
-
-// removeWorkspace removes a runner's job-workspace directory from the host
-// disk after the container has exited and it is no longer in use. Under
-// --ephemeral the container root itself (a btrfs CoW snapshot) is discarded
-// by systemd-nspawn on exit, so only this host-mirrored workspace needs
-// removing here.
-func (s *Scaler) removeWorkspace(workspaceDir string) {
-	if workspaceDir == "" {
-		return
-	}
-	if err := os.RemoveAll(workspaceDir); err != nil {
-		s.logger.Warn("failed to remove workspace", "dir", workspaceDir, "error", err.Error())
-	}
 }
 
 func (s *Scaler) removeRunnerRegistration(ctx context.Context, runnerID int64, name string) {

@@ -34,7 +34,7 @@ func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeScaleSetClient{jitRunnerID: 42}
-	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 	s.launch = func(context.Context, *runner.Runner) error {
 		return errors.New("launch failed")
 	}
@@ -52,7 +52,7 @@ func TestStartRunnerSetsImageAndEntrypoint(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeScaleSetClient{jitRunnerID: 7}
-	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+	s := New(client, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 
 	var got *runner.Runner
 	s.launch = func(_ context.Context, r *runner.Runner) error {
@@ -69,9 +69,6 @@ func TestStartRunnerSetsImageAndEntrypoint(t *testing.T) {
 	if got.Entrypoint != "/opt/actions-runner/run.sh" {
 		t.Errorf("Entrypoint = %q, want /opt/actions-runner/run.sh", got.Entrypoint)
 	}
-	if got.WorkspaceDir == "" {
-		t.Errorf("WorkspaceDir not populated: %+v", got)
-	}
 	if got.JITConfig != "jit-config" || got.Name == "" {
 		t.Errorf("runner fields not populated: %+v", got)
 	}
@@ -81,7 +78,7 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 	t.Parallel()
 
 	var output bytes.Buffer
-	s := New(nil, 1, 0, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+	s := New(nil, 1, 0, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 	s.logger = slog.New(slog.NewJSONHandler(&output, nil))
 
 	for _, count := range []int{0, 0, 1, 1, 0, 1} {
@@ -98,7 +95,7 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 func TestHandleJobStartedMarksBusy(t *testing.T) {
 	t.Parallel()
 
-	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 	r := &runner.Runner{Name: "runner-busy"}
 	s.mu.Lock()
 	s.runners["runner-busy"] = r
@@ -125,7 +122,7 @@ func TestHandleJobStartedMarksBusy(t *testing.T) {
 func TestShutdownNoRunners(t *testing.T) {
 	t.Parallel()
 
-	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 
 	// Must return immediately and not hang when there is nothing tracked.
 	done := make(chan struct{})
@@ -143,7 +140,7 @@ func TestShutdownNoRunners(t *testing.T) {
 func TestShutdownForceKillsOnExpiredContext(t *testing.T) {
 	t.Parallel()
 
-	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh", "/opt/runner/workspaces")
+	s := New(nil, 1, 1, 0, nil, "/srv/image", "/opt/actions-runner/run.sh")
 
 	// Seed a runner that is idle (no output yet -> RunningJob() == false).
 	// Its cmd is nil, so Kill() is a no-op. With an already-cancelled context
