@@ -21,6 +21,12 @@ type scaleSetClient interface {
 
 type launchRunnerFunc func(context.Context, *runner.Runner) error
 
+// assignmentGrace is how long after launch a runner's job-assignment state is
+// considered unconfirmed. Within this window a runner may have accepted a job
+// whose JobStarted has not been processed yet, so graceful shutdown refrains
+// from killing it as idle.
+const assignmentGrace = 30 * time.Second
+
 // Scaler manages runner lifecycle: launch, track, cleanup.
 type Scaler struct {
 	client      scaleSetClient
@@ -146,12 +152,19 @@ func (s *Scaler) Shutdown(ctx context.Context) {
 	// Kick any idle runners so they drain promptly; job-executing runners stay.
 	// A runner is considered in-flight if it is either tracked-busy (SetBusy via
 	// JobStarted) or its captured output shows "Running job:" -- the union covers
-	// both the pre-flush window and the rare name-mismatch case.
-	for _, r := range runners {
-		if !r.IsBusy() && !r.RunningJob() {
-			_ = r.Kill()
+	// both the pre-flush window and the rare name-mismatch case. A runner inside
+	// its assignment-grace window (recently launched, JobStarted not yet
+	// processed) is never killed as idle, because it may already hold a job.
+	killIdle := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, r := range s.runners {
+			if !r.IsBusy() && !r.RunningJob() && r.AssignmentGraceElapsed(assignmentGrace) {
+				_ = r.Kill()
+			}
 		}
 	}
+	killIdle()
 
 	// Wait for the monitor goroutines to remove every runner, or until ctx
 	// expires and we force-kill the remainder.
@@ -174,6 +187,10 @@ func (s *Scaler) Shutdown(ctx context.Context) {
 			s.waitDrain(ctx)
 			return
 		case <-ticker.C:
+			// Reclaim runners once their assignment grace has elapsed and they
+			// are still idle, so the drain completes instead of waiting out the
+			// timeout on a genuinely idle runner.
+			killIdle()
 		}
 	}
 

@@ -2,7 +2,7 @@
 # Build a lightweight systemd-nspawn runner rootfs for actions-runner-processor.
 #
 # Produces a rootfs .tar.gz that you expand to runner.image_path (default
-# /opt/runner/image). The manifest image/image.yaml declares the base distro,
+# /opt/runner-btrfs/image). The manifest image/image.yaml declares the base distro,
 # extra apt packages, and the actions/runner version.
 #
 # Requirements: debootstrap, apt, curl, and root (sudo). On CI this runs as
@@ -175,7 +175,7 @@ Group=runner
 Environment=JITCONFIG_FILE=/opt/actions-runner/.jitconfig
 ExecStart=/opt/actions-runner/entrypoint.sh
 TimeoutStopSec=7200
-ExecStopPost=/usr/bin/systemctl poweroff
+ExecStopPost=+/usr/bin/systemctl poweroff
 
 [Install]
 WantedBy=multi-user.target
@@ -198,6 +198,6 @@ tar -czf "$TARBALL" -C "$ROOTFS" .
 echo ""
 echo "Done. Image: $TARBALL"
 echo "On the host:"
-echo "  sudo rm -rf /opt/runner/image && sudo mkdir -p /opt/runner/image"
-echo "  sudo tar -xzf $TARBALL -C /opt/runner/image"
-echo "  config: runner.image_path=/opt/runner/image, runner.entrypoint=/opt/actions-runner/run.sh"
+echo "  sudo rm -rf /opt/runner-btrfs/image && sudo mkdir -p /opt/runner-btrfs/image"
+echo "  sudo tar -xzf $TARBALL -C /opt/runner-btrfs/image"
+echo "  config: runner.image_path=/opt/runner-btrfs/image, runner.entrypoint=/opt/actions-runner/run.sh"

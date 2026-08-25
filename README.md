@@ -46,7 +46,7 @@ ephemeral runners inside [systemd-nspawn](https://systemd.io/) containers.
 ```bash
 apt install systemd-container
 
-# Build a custom runner image (root filesystem) and place it at /opt/runner/image
+# Build a custom runner image (root filesystem) and place it at /opt/runner-btrfs/image
 # (or a btrfs subvolume — see below). The image must contain actions/runner
 # preinstalled at /opt/actions-runner and a systemd unit that boots it; the
 # bundled image/build-*.sh scripts bake this in.
@@ -89,11 +89,11 @@ sudo OUTPUT_DIR=/tmp/img bash image/build-image.sh
 `image/build-image.sh` (on `workflow_dispatch`, or on push/PR touching
 `image/**`) and uploads the rootfs tarball as an artifact.
 
-**Expand to the host** (`runner.image_path`, default `/opt/runner/image`):
+**Expand to the host** (`runner.image_path`, default `/opt/runner-btrfs/image`):
 
 ```bash
-sudo rm -rf /opt/runner/image && sudo mkdir -p /opt/runner/image
-sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner/image
+sudo rm -rf /opt/runner-btrfs/image && sudo mkdir -p /opt/runner-btrfs/image
+sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner-btrfs/image
 ```
 
 A quick manual way to prepare a base rootfs (equivalent to what the script does):
@@ -106,8 +106,8 @@ sudo mkdir -p /opt/runner/work-rootfs/opt/actions-runner
 curl -L "https://github.com/actions/runner/releases/download/v2.326.0/actions-runner-linux-x64-2.326.0.tar.gz" \
   | sudo tar xz -C /opt/runner/work-rootfs/opt/actions-runner
 # 3. atomically place it (so nspawn never sees a partial tree)
-sudo rm -rf /opt/runner/image
-sudo mv /opt/runner/work-rootfs /opt/runner/image
+sudo rm -rf /opt/runner-btrfs/image
+sudo mv /opt/runner/work-rootfs /opt/runner-btrfs/image
 ```
 
 For a full GitHub-hosted-compatible toolset (option A), this repo ships
@@ -285,7 +285,7 @@ systemd-nspawn \
   --directory=/opt/runner-btrfs/image \   # custom image (a btrfs subvolume)
   --ephemeral \                            # CoW-snapshotted root; changes discarded on exit
   --boot \                                 # systemd as PID1: systemctl/dockerd work in jobs
-  --network-zone=runner \                  # private netns; isolated from host network admin
+--network-zone=rn-<runner-id> \             # per-runner private bridge; isolated from host and other jobs
   --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \   # dockerd (safe: netns is private)
   --bind-ro=/run/actions-runner-processor/runner-<name>.jitconfig:/opt/actions-runner/.jitconfig \
   --machine=runner-<name>
@@ -293,11 +293,11 @@ systemd-nspawn \
 
 > `--ephemeral` CoW-snapshots the image directory onto real disk, boots the writable snapshot, and discards it on exit — so job writes (including `sudo apt install` into `/usr`) never touch a RAM overlay and can't hit `ENOSPC`. For this to be cheap, the image must be a **btrfs subvolume** (ext4 directories fall back to a full copy). The bundled host runs it from `/opt/runner-btrfs/image` (a loopback btrfs filesystem mounted at boot); set `runner.image_path` accordingly.
 
-> **Privacy / DNS / networking**: the container is booted with `--boot` so job steps can `systemctl start docker`. `--network-zone=runner` puts it in its own network namespace on an nspawn-managed private bridge; the host NATs the zone out (see `deploy/deploy.sh`), and the image bakes a real `resolv.conf` (the old host `--bind-ro=/etc/resolv.conf` would point at the container's own loopback). The JIT credential is passed via a ro bind-mounted root-only file, never on the command line.
+> **Privacy / DNS / networking**: the container is booted with `--boot` so job steps can `systemctl start docker`. `--network-zone=rn-<runner-id>` (a per-runner zone) puts it in its own network namespace on its own nspawn-managed bridge, so concurrent jobs are isolated from each other over L2; the host NATs outbound HTTPS out (see `deploy/deploy.sh`), and the image bakes a real `resolv.conf` (the old host `--bind-ro=/etc/resolv.conf` would point at the container's own loopback). The JIT credential is passed via a ro bind-mounted root-only file, never on the command line.
 
 - **Custom image** — the image directory is a btrfs subvolume (the base, CoW layer).
 - **Ephemeral** — each job boots a disposable CoW snapshot discarded on exit, so jobs can `apt install` and mutate `/usr` without affecting other jobs or the host.
-- **Network** — `--network-zone` gives each runner a private network namespace on an nspawn-managed bridge; the host NATs it out for outbound HTTPS. `CAP_NET_ADMIN`/`CAP_SYS_ADMIN` (for dockerd) can only touch the runner's own netns.
+- **Network** — `--network-zone=rn-<runner-id>` (per-runner zone) gives each runner a private network namespace on its own nspawn-managed bridge, isolated from the host AND from other concurrent jobs; the host NATs outbound HTTPS out. `CAP_NET_ADMIN`/`CAP_SYS_ADMIN` (for dockerd) can only touch the runner's own netns.
 - **sudo** — the runner boots (via the baked `actions-runner.service`) as the `runner` user (GitHub layout); passwordless sudo makes `sudo` work as expected in job steps.
 - The configuration file and GitHub App private key are masked with `/dev/null` inside the sandbox.
 - Runner registrations are removed by ID whenever a runner process exits, including startup failures.

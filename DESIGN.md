@@ -94,7 +94,7 @@ It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://
 | Listener Loop | `github.com/actions/scaleset/listener` | Message loop, ack, and retry built in |
 | Auth | GitHub App (installation token) | Existing policy. Safer than PAT, scope-limited |
 | Sandbox | systemd-nspawn | Isolated container from a custom rootfs image. Ephemeral CoW root |
-| Custom Image | directory rootfs (`/opt/runner/image`) | Lightweight (debootstrap) or full (systemd-nspawn + runner-images scripts) built by `image/build-*.sh`, baked in CI. Writable during job (sudo) |
+| Custom Image | directory rootfs (`/opt/runner-btrfs/image`) | Lightweight (debootstrap) or full (systemd-nspawn + runner-images scripts) built by `image/build-*.sh`, baked in CI. Writable during job (sudo) |
 | Ephemeral Root | `--ephemeral` | Image (a btrfs subvolume) is CoW-snapshotted onto real disk; the writable snapshot is discarded on exit |
 | Runner | `actions/runner` (official) | No `--once --ephemeral` needed. Boot from JIT Config mode |
 | Process Manager | systemd | Auto-start on reboot, log management |
@@ -215,10 +215,10 @@ func (r *Runner) Kill() error
 # Boot a runner per job in an nspawn container
 R_NAME="runner-$(uuidgen | cut -c1-8)"
 systemd-nspawn \
-  --directory=/opt/runner/image \                    # custom image (a btrfs subvolume)
+  --directory=/opt/runner-btrfs/image \                    # custom image (a btrfs subvolume)
   --ephemeral \                                        # CoW-snapshot root; discarded on exit
   --boot \                                             # systemd as PID1: systemctl/dockerd work
-  --network-zone=runner \                              # private netns (CAP_NET_ADMIN can't touch host)
+--network-zone=rn-<runner-id> \             # per-runner private bridge (isolated from host and other jobs)
   --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \            # dockerd: storage + netfilter (private netns)
   --bind-ro=/run/actions-runner-processor/${R_NAME}.jitconfig:/opt/actions-runner/.jitconfig \
   --machine="${R_NAME}" \
@@ -232,7 +232,7 @@ systemd-nspawn \
 ```
 
 - Custom image lives at `runner.image_path` (a btrfs subvolume, e.g. `/opt/runner-btrfs/image`). Built by `image/build-image.sh` (lightweight) or `image/build-image-full.sh` (full).
-- Networking: `--network-zone=runner` gives each runner a private network namespace on an nspawn-managed bridge; the host NATs the zone out (see `deploy/deploy.sh`) for outbound HTTPS only.
+- Networking: `--network-zone=rn-<runner-id>` gives each runner a private network namespace on its OWN nspawn-managed bridge (per-runner zone, so concurrent jobs can't reach each other over L2); the host NATs outbound HTTPS out (see `deploy/deploy.sh`).
 - resolv.conf is baked into the image with real resolvers (the old `--bind-ro=/etc/resolv.conf` would point at 127.0.0.53 = the container's own loopback in a private netns).
 - The runner boots as the `runner` user inside the container (passwordless sudo) → `sudo` works in job steps. systemd-nspawn itself runs as host root.
 - The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.
@@ -280,11 +280,11 @@ in a `systemd-nspawn` container (`--boot`), and runs the same build scripts
 directly inside with the repo bind-mounted. **No LXD or Packer is needed.**
 Heavy (~1h, 50GB+), gated on `workflow_dispatch` → Type: **full**.
 
-The tarball is expanded to `runner.image_path` (default `/opt/runner/image`):
+The tarball is expanded to `runner.image_path` (default `/opt/runner-btrfs/image`):
 
 ```bash
-sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner/image     # B
-sudo tar -xzf actions-runner-image-full-amd64.tar.gz -C /opt/runner/image # A
+sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner-btrfs/image     # B
+sudo tar -xzf actions-runner-image-full-amd64.tar.gz -C /opt/runner-btrfs/image # A
 ```
 
 ### 3.4 main entrypoint
@@ -530,7 +530,7 @@ The same `maxRunners` / `minRunners` apply across all Installations. Runners onl
 # 1. Dependencies
 apt install systemd-container
 
-# 2. Build the custom runner image (place at /opt/runner/image)
+# 2. Build the custom runner image (place at /opt/runner-btrfs/image)
 #    Use the repo's builders: image/build-image.sh (lightweight) or
 #    image/build-image-full.sh (full GitHub-hosted-compatible toolset).
 #    Manual lightweight equivalent:
@@ -539,8 +539,8 @@ sudo debootstrap --variant=minbase noble /opt/runner/work-rootfs
 sudo mkdir -p /opt/runner/work-rootfs/opt/actions-runner
 curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION#v}.tar.gz" \
   | sudo tar xz -C /opt/runner/work-rootfs/opt/actions-runner
-sudo rm -rf /opt/runner/image
-sudo mv /opt/runner/work-rootfs /opt/runner/image
+sudo rm -rf /opt/runner-btrfs/image
+sudo mv /opt/runner/work-rootfs /opt/runner-btrfs/image
 
 # 3. systemd-nspawn must run as root on the host; the runner inside the image
 #    boots as the dedicated `runner` user

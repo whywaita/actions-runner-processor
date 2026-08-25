@@ -11,7 +11,9 @@ fi
 # Create the custom runner image directory.
 # For nspawn mode this must be a root filesystem tree with actions/runner
 # preinstalled (e.g. built via distrobuilder or debootstrap + actions/runner).
-mkdir -p /opt/runner/image
+# The canonical btrfs-backed location (matches config.example.yaml and
+# deploy.sh) is /opt/runner-btrfs/image; keep them in lockstep.
+mkdir -p /opt/runner-btrfs/image
 
 # Set permissions
 chmod 600 /etc/actions-runner-processor/config.yaml 2>/dev/null || true

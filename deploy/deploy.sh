@@ -19,7 +19,8 @@
 #   GITHUB_REPO=…    repo whose CI builds the image (default whywaita/actions-runner-processor)
 #   RUNNER_IMAGE_PATH=…  image subvolume path (default /opt/runner-btrfs/image)
 #   UPLINK=eth0      host egress interface for NAT (default: first default-route iface)
-#   ZONE=runner      nspawn network zone name (must match the binary's --network-zone)
+#   ZONE=runner      per-runner nspawn zones share the NAT/ip_forward (host NATs
+#                    all of them outbound; each runner gets its own bridge)
 #   DNS1/DNS2=…      resolvers baked/verified into the container resolv.conf
 #   BINARY_PATH=…    use a prebuilt binary instead of compiling
 #   SKIP_IMAGE=1     no image work (binary+network+config+restart only)
@@ -103,7 +104,10 @@ ensure_binary() {
   fi
   local built_sha=""
   if [[ -n "${BINARY_PATH:-}" && -f "$BINARY_PATH" ]]; then
-    built_sha="$(sha256sum "$BINARY_PATH" | awk '{print $1}')"
+    log "   installing supplied binary from $BINARY_PATH"
+    cp "$BINARY_PATH" "$BINARY.tmp"
+    mv "$BINARY.tmp" "$BINARY"; chmod 755 "$BINARY"
+    built_sha="$(sha256sum "$BINARY" | awk '{print $1}')"
   elif [[ -d "$REPO_ROOT/cmd/actions-runner-processor" ]]; then
     command -v go >/dev/null 2>&1 || die "go not installed; build the binary and pass BINARY_PATH=, or install go"
     log "   building $BINARY from $REPO_ROOT"
@@ -162,7 +166,18 @@ ensure_image() {
 # Expand the rootfs tarball into the image subvolume (replace contents).
 install_image_rootfs() {
   local tarball="$1" tmpdir
-  tmpdir="$(mktemp -d /opt/runner-btrfs/.extract.XXXXXX)"
+  # Provision the btrfs backing mount + image subvolume before extracting, so a
+  # clean host never runs mktemp against a nonexistent directory. The image MUST
+  # be a btrfs subvolume for systemd-nspawn --ephemeral CoW snapshots; a plain
+  # directory would fall back to a full copy per job (slow but functional).
+  mkdir -p "$IMAGE_MOUNT"
+  if ! btrfs subvolume show "$IMAGE_SUBVOL" >/dev/null 2>&1; then
+    if ! btrfs subvolume create "$IMAGE_SUBVOL" 2>/dev/null; then
+      log "   $IMAGE_MOUNT is not a btrfs filesystem; using a plain dir for the image (copied per job)"
+      mkdir -p "$IMAGE_SUBVOL"
+    fi
+  fi
+  tmpdir="$(mktemp -d "$IMAGE_MOUNT/.extract.XXXXXX")"
   log "expanding $tarball into $IMAGE_SUBVOL"
   tar -xzf "$tarball" -C "$tmpdir"
   # swap the subvolume contents (the old snapshot dirs are discarded by nspawn)
@@ -192,7 +207,17 @@ for ln in src:
     if ln.rstrip() == "runner:":
         in_runner = True
         out.append(ln); continue
-    if in_runner and not ln[:2].strip() and not ln.startswith(" "):
+    # End the runner section at the next non-indented, non-blank (top-level)
+    # key. Previously the condition never matched top-level keys like
+    # "metrics:", so image_path was appended under the wrong section and
+    # silently ignored.
+    if in_runner and ln.strip() and not ln.startswith(" "):
+        # Insert runner.image_path before leaving the section, otherwise an
+        # existing config that lacks image_path would never get it added (the
+        # runner would fall back to the wrong default image).
+        if not have:
+            out.append('  image_path: "%s"' % img)
+            have = True
         in_runner = False
     if not in_runner:
         out.append(ln); continue
@@ -203,6 +228,18 @@ if in_runner and not have:
     out.append('  image_path: "%s"' % img)
 open(p, "w").write("\n".join(out) + "\n")
 PY
+}
+
+# ---------------------------------------------------------------------------
+# 4b. Install the systemd unit (source deployments only). The packaged .deb
+# handles this via postinst; a fresh host flow of deploy.sh never had it, so
+# `systemctl restart "$SERVICE"` would fail with unit-not-found.
+# ---------------------------------------------------------------------------
+ensure_unit() {
+  local src="$SCRIPT_DIR/actions-runner-processor.service"
+  [[ -f "$src" ]] || die "systemd unit not found: $src"
+  install -m 0644 "$src" "/etc/systemd/system/$SERVICE"
+  log "installed systemd unit $SERVICE"
 }
 
 # ---------------------------------------------------------------------------
@@ -224,6 +261,7 @@ restart_service() {
 main() {
   ensure_network
   ensure_binary
+  ensure_unit
   ensure_image
   ensure_config
   restart_service

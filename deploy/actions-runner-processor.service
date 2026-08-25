@@ -25,10 +25,14 @@ TimeoutStopSec=660
 # restart/stop -- including every nspawn child. That would SIGKILL the runner
 # containers mid-job before this unit's process ever runs its drain logic
 # (observed as "Container ... terminated by signal KILL" + GitHub "lost
-# communication"). With KillMode=process, systemd signals only the processor
-# main process, letting it drain in-flight jobs before exiting. The nspawn
-# children are owned and reaped by the processor itself.
-KillMode=process
+# communication"). With KillMode=mixed, systemd signals ONLY the processor main
+# process on stop/restart, letting it drain in-flight jobs before exiting;
+# after TimeoutStopSec it SIGKILLs any cgroup members still alive. This still
+# gives the processor full ownership of its nspawn children during graceful
+# drain, while ALSO reaping any orphaned containers on an unexpected crash
+# (KillMode=process would leave them behind and Restart=always would then run
+# a second processor alongside stale runners).
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

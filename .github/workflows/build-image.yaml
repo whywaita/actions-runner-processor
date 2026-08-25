@@ -1,7 +1,7 @@
 # Build the actions-runner-processor custom runner image (nspawn rootfs).
 #
 # Two image types are produced, both as a rootfs .tar.gz that you expand to
-# runner.image_path (default /opt/runner/image):
+# runner.image_path (default /opt/runner-btrfs/image):
 #
 #   build        — lightweight rootfs (debootstrap + a few apt packages),
 #                  fast, runs on pull_request / push / workflow_dispatch.
@@ -68,8 +68,12 @@ jobs:
       - name: Smoke-test that the runner binary is present
         run: |
           IMG="/tmp/runner-image/actions-runner-image-$(awk '/^arch:/{gsub(/"/,"",$2); print $2}' image/image.yaml).tar.gz"
-          tar tzf "$IMG" \
-            | grep -q 'opt/actions-runner/run.sh' \
+          # Consume the full tar listing before grepping: with `tar | grep -q`
+          # under pipefail, grep -q closes the pipe as soon as it matches,
+          # SIGPIPEs tar (exit 141), and the step fails even when the file is
+          # present. Capture the listing first so tar completes.
+          ENTRIES="$(tar tzf "$IMG")"
+          echo "$ENTRIES" | grep -q 'opt/actions-runner/run.sh' \
             && echo "runner run.sh present" \
             || { echo "run.sh missing in image"; exit 1; }
 
@@ -94,6 +98,15 @@ jobs:
 
       - name: Lint image shell scripts
         run: shellcheck image/build-image.sh image/build-image-full.sh
+
+      - name: Free disk space for the full image build
+        run: |
+          # The full builder reaches tens of GB (toolchains + apt). GitHub-hosted
+          # ubuntu-24.04 runners ship with heavy preinstalled toolchains, so
+          # clear the ones this build doesn't need to avoid ENOSPC mid-build.
+          sudo rm -rf /opt/hostedtoolcache /usr/share/dotnet \
+            /usr/local/lib/android /opt/ghc
+          df -h / | tail -1
 
       - name: Build full rootfs
         run: |
