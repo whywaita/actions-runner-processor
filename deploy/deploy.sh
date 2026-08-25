@@ -80,8 +80,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/iptables -t nat -C POSTROUTING -o "$UPLINK" -j MASQUERADE \
-  || /sbin/iptables -t nat -A POSTROUTING -o "$UPLINK" -j MASQUERADE
+ExecStart=/bin/bash -c 'iptables -t nat -C POSTROUTING -o "$UPLINK" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$UPLINK" -j MASQUERADE'
 
 [Install]
 WantedBy=multi-user.target
