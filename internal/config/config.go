@@ -130,7 +130,7 @@ func Load() (*Config, error) {
 	// The runner boots from a custom image (nspawn); provide a conventional
 	// default path reachable from the deploy layout.
 	if cfg.Runner.ImagePath == "" {
-		cfg.Runner.ImagePath = "/opt/runner/image"
+		cfg.Runner.ImagePath = "/opt/runner-btrfs/image"
 	}
 	if cfg.Runner.ShutdownGraceTimeout.Duration == 0 {
 		cfg.Runner.ShutdownGraceTimeout.Duration = 10 * time.Minute

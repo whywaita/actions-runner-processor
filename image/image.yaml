@@ -2,7 +2,7 @@
 #
 # This manifest drives image/build-image.sh, which builds a lightweight root
 # filesystem (rootfs) that systemd-nspawn boots as runner.image_path (default
-# /opt/runner/image).
+# /opt/runner-btrfs/image).
 #
 # WHAT THIS IMAGE IS / CONTAINS
 #   - A minimal Debian/Ubuntu base (debootstrap --variant=minbase, so no

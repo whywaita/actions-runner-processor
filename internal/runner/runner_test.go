@@ -88,7 +88,7 @@ func TestNspawnArgs(t *testing.T) {
 	r := &Runner{
 		Name:        "runner-eaa075e1",
 		JITConfig:   "some-jit-config",
-		ImagePath:   "/opt/runner/image",
+		ImagePath:   "/opt/runner-btrfs/image",
 		MaskedPaths: []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
 	}
 	args := nspawnArgs(r)
@@ -96,7 +96,7 @@ func TestNspawnArgs(t *testing.T) {
 	// The argument list is order-sensitive; verify it positionally.
 	wantPrefix := []string{
 		"--quiet",
-		"--directory=/opt/runner/image",
+		"--directory=/opt/runner-btrfs/image",
 		"--ephemeral",
 		"--boot",
 		"--network-zone=runner",
@@ -145,7 +145,7 @@ func TestNspawnArgsNoJIT(t *testing.T) {
 	r := &Runner{
 		Name:      "runner-eaa075e1",
 		JITConfig: "",
-		ImagePath: "/opt/runner/image",
+		ImagePath: "/opt/runner-btrfs/image",
 	}
 	args := nspawnArgs(r)
 

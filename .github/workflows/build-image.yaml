@@ -1,7 +1,7 @@
 # Build the actions-runner-processor custom runner image (nspawn rootfs).
 #
 # Two image types are produced, both as a rootfs .tar.gz that you expand to
-# runner.image_path (default /opt/runner/image):
+# runner.image_path (default /opt/runner-btrfs/image):
 #
 #   build        — lightweight rootfs (debootstrap + a few apt packages),
 #                  fast, runs on pull_request / push / workflow_dispatch.

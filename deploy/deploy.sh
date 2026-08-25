@@ -162,7 +162,18 @@ ensure_image() {
 # Expand the rootfs tarball into the image subvolume (replace contents).
 install_image_rootfs() {
   local tarball="$1" tmpdir
-  tmpdir="$(mktemp -d /opt/runner-btrfs/.extract.XXXXXX)"
+  # Provision the btrfs backing mount + image subvolume before extracting, so a
+  # clean host never runs mktemp against a nonexistent directory. The image MUST
+  # be a btrfs subvolume for systemd-nspawn --ephemeral CoW snapshots; a plain
+  # directory would fall back to a full copy per job (slow but functional).
+  mkdir -p "$IMAGE_MOUNT"
+  if ! btrfs subvolume show "$IMAGE_SUBVOL" >/dev/null 2>&1; then
+    if ! btrfs subvolume create "$IMAGE_SUBVOL" 2>/dev/null; then
+      log "   $IMAGE_MOUNT is not a btrfs filesystem; using a plain dir for the image (copied per job)"
+      mkdir -p "$IMAGE_SUBVOL"
+    fi
+  fi
+  tmpdir="$(mktemp -d "$IMAGE_MOUNT/.extract.XXXXXX")"
   log "expanding $tarball into $IMAGE_SUBVOL"
   tar -xzf "$tarball" -C "$tmpdir"
   # swap the subvolume contents (the old snapshot dirs are discarded by nspawn)

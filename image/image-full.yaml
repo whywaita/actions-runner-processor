@@ -8,7 +8,7 @@
 #
 # This is a heavy build: it downloads many toolchains (50GB+ of images/apt) and
 # takes on the order of an hour. The captured rootfs is meant to be expanded to
-# runner.image_path (default /opt/runner/image).
+# runner.image_path (default /opt/runner-btrfs/image).
 
 # Target Ubuntu release of the actions/runner-images image to build.
 # Supported: "22.04" (jammy) or "24.04" (noble).

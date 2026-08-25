@@ -64,8 +64,8 @@ CONF="/etc/actions-runner-processor/config.yaml"
 chmod 600 "$CONF" 2>/dev/null || true
 
 # --- Install a runner image if missing ----------------------------------------
-if [ ! -d /opt/runner/image ] || [ -z "$(ls -A /opt/runner/image 2>/dev/null)" ]; then
-  echo ">>> /opt/runner/image is empty — the processor cannot boot runners until"
+if [ ! -d /opt/runner-btrfs/image ] || [ -z "$(ls -A /opt/runner-btrfs/image 2>/dev/null)" ]; then
+  echo ">>> /opt/runner-btrfs/image is empty — the processor cannot boot runners until"
   echo "    you build a custom image. See DESIGN.md §7 (image/build-image.sh)."
 fi
 
