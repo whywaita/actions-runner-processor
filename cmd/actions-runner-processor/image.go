@@ -203,12 +203,12 @@ func extractArtifactZip(r io.Reader, dest string) error {
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := io.Copy(tmp, r); err != nil {
+	if _, cerr := io.Copy(tmp, r); cerr != nil {
 		_ = tmp.Close()
-		return err
+		return cerr
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if cerr := tmp.Close(); cerr != nil {
+		return cerr
 	}
 
 	zr, err := zip.OpenReader(tmpName)
@@ -305,7 +305,7 @@ func extractTar(r io.Reader, dest string) error {
 			if err := os.Symlink(hdr.Linkname, target); err != nil {
 				return err
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
@@ -314,7 +314,7 @@ func extractTar(r io.Reader, dest string) error {
 				return err
 			}
 			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
+				_ = f.Close()
 				return err
 			}
 			if err := f.Close(); err != nil {
