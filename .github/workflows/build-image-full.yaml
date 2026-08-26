@@ -71,6 +71,8 @@ jobs:
           done
 
       - name: Publish split parts to the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Upload the split parts to the newest release (created by tagpr),
           # replacing any previous parts. gh is preinstalled on hosted runners.
