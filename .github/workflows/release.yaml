@@ -43,10 +43,15 @@ jobs:
         run: |
           sudo apt-get update -y -qq
           sudo apt-get install -y -qq debootstrap
+          # Build the rootfs OUTSIDE the repo (under $RUNNER_TEMP): build-image.sh
+          # emits a root-owned rootfs whose deep dirs (e.g. etc/ssl/private) are
+          # unreadable, and GoReleaser's archive globs walk the repo tree and fail
+          # on them. Only the tarball is copied into ./.release/ for extra_files.
+          sudo mkdir -p "$RUNNER_TEMP"/runner-image
+          sudo bash image/build-image.sh "$RUNNER_TEMP"/runner-image
           sudo mkdir -p ./.release/runner-image
-          # Builds the lightweight rootfs for this (amd64) runner; the tarball
-          # is attached to the Release via goreleaser extra_files.
-          sudo bash image/build-image.sh ./.release/runner-image
+          sudo cp "$RUNNER_TEMP"/runner-image/actions-runner-image-*.tar.gz ./.release/runner-image/
+          ls -la ./.release/runner-image/
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           args: release --clean
