@@ -216,13 +216,20 @@ needed — the runner boots directly from a short-lived JIT token.
 
 The easiest path is the setup script, which installs the latest release from
 GitHub Releases as a `.deb` (pulls `systemd-container`, the example config, the
-systemd unit), then lets you wire it into systemd:
+btrfs backing, and the systemd unit), provisions a **btrfs** runner-image
+subvolume, fetches the prebuilt **lightweight** image from the Release, wires
+host NAT for the runner zone, and enables the service:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash
 # or install a specific version:
 curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash -s v0.0.5
 ```
+
+The image is **required to be a btrfs subvolume** (the processor enforces this
+at startup and errors out otherwise), so running the runner on an ordinary ext4
+path is not supported. `setup.sh` creates a loopback btrfs backing at
+`/opt/runner-btrfs` automatically.
 
 Then edit `/etc/actions-runner-processor/config.yaml` (set `github.client_id` /
 `github.private_key_path`), place the GitHub App `.pem`, and:
@@ -292,7 +299,7 @@ systemd-nspawn \
   --machine=runner-<name>
 ```
 
-> `--ephemeral` CoW-snapshots the image directory onto real disk, boots the writable snapshot, and discards it on exit — so job writes (including `sudo apt install` into `/usr`) never touch a RAM overlay and can't hit `ENOSPC`. For this to be cheap, the image must be a **btrfs subvolume** (ext4 directories fall back to a full copy). The bundled host runs it from `/opt/runner-btrfs/image` (a loopback btrfs filesystem mounted at boot); set `runner.image_path` accordingly.
+> `--ephemeral` CoW-snapshots the image directory onto real disk, boots the writable snapshot, and discards it on exit — so job writes (including `sudo apt install` into `/usr`) never touch a RAM overlay and can't hit `ENOSPC`. **btrfs is enforced**: the image must be a btrfs subvolume (the processor fails startup otherwise), and `deploy/setup.sh` provisions a loopback btrfs at `/opt/runner-btrfs` automatically. Set `runner.image_path` accordingly.
 
 > **Privacy / DNS / networking**: the container is booted with `--boot` so job steps can `systemctl start docker`. `--network-zone=rn-<runner-id>` (a per-runner zone) puts it in its own network namespace on its own nspawn-managed bridge, so concurrent jobs are isolated from each other over L2; the host NATs outbound HTTPS out (see `deploy/deploy.sh`), and the image bakes a real `resolv.conf` (the old host `--bind-ro=/etc/resolv.conf` would point at the container's own loopback). The JIT credential is passed via a ro bind-mounted root-only file, never on the command line.
 

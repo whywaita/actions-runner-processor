@@ -13,6 +13,14 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Attach the prebuilt lightweight runner image (built by the release workflow
+# into ./.release/runner-image before goreleaser runs) to each Release. The
+# full image is too large for a GitHub Release asset (2GB/file cap) and is
+# omitted here.
+release:
+  extra_files:
+    - glob: ./.release/runner-image/actions-runner-image-*.tar.gz
+
 changelog:
   sort: asc
 

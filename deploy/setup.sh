@@ -9,10 +9,12 @@
 # Without VERSION the latest published release is used. This script:
 #   1. Detects the architecture and downloads the matching .deb from
 #      the GitHub Release (actions-runner-processor_<ver>_<arch>.deb).
-#   2. Installs it with apt (pulls in systemd-container + config + unit file).
-#   3. Creates /etc/actions-runner-processor/config.yaml from the packaged
-#      example if none exists yet.
-#   4. Masks nothing; enables and starts the actions-runner-processor service.
+#   2. Installs it with apt (pulls in systemd-container + btrfs backing +
+#      config + unit file via postinstall).
+#   3. Ensures a btrfs runner-image subvolume at /opt/runner-btrfs/image and,
+#      if it is empty, fetches the prebuilt lightweight image from the Release.
+#   4. Configures host NAT for the private runner zone.
+#   5. Enables and starts the actions-runner-processor service.
 #
 # Configuration (GitHub App ID + private key path) must be filled in at
 # /etc/actions-runner-processor/config.yaml before the service can register.
@@ -63,10 +65,29 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${TMPDIR}/${DEB}"
 CONF="/etc/actions-runner-processor/config.yaml"
 chmod 600 "$CONF" 2>/dev/null || true
 
-# --- Install a runner image if missing ----------------------------------------
-if [ ! -d /opt/runner-btrfs/image ] || [ -z "$(ls -A /opt/runner-btrfs/image 2>/dev/null)" ]; then
-  echo ">>> /opt/runner-btrfs/image is empty — the processor cannot boot runners until"
-  echo "    you build a custom image. See DESIGN.md §7 (image/build-image.sh)."
+# --- Install the runner image if missing --------------------------------------
+# The lightweight image is published as a GitHub Release asset
+# (actions-runner-image-<arch>.tar.gz). Fetch and expand it into the btrfs image
+# subvolume created by postinstall (ensure_btrfs). Set SKIP_IMAGE=1 to skip,
+# e.g. when building a custom image locally and placing it yourself.
+if [ "${SKIP_IMAGE:-0}" != "1" ]; then
+  if [ -d /opt/runner-btrfs/image ] && [ -n "$(ls -A /opt/runner-btrfs/image 2>/dev/null)" ]; then
+    echo ">>> runner image already present at /opt/runner-btrfs/image"
+  else
+    IMAGE_URL="https://github.com/${REPO}/releases/download/${VERSION}/actions-runner-image-${ARCH}.tar.gz"
+    echo ">>> fetching runner image: ${IMAGE_URL}"
+    if curl -fsSL "$IMAGE_URL" -o "$TMPDIR/image.tar.gz"; then
+      tar -xzf "$TMPDIR/image.tar.gz" -C /opt/runner-btrfs/image
+      echo ">>> runner image installed at /opt/runner-btrfs/image"
+    else
+      echo ">>> ERROR: no prebuilt runner image found for ${VERSION}" >&2
+      echo ">>>         build one with image/build-image.sh and expand into" >&2
+      echo ">>>         /opt/runner-btrfs/image, then start the service." >&2
+      exit 1
+    fi
+  fi
+else
+  echo ">>> SKIP_IMAGE=1: skipping runner image fetch"
 fi
 
 # --- Host networking for the private runner zone ------------------------------

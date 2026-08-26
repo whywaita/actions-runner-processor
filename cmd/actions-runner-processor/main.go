@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -232,6 +233,7 @@ func preflight(cfg *config.Config) error {
 	}{
 		{"systemd-nspawn binary", checkBinary("systemd-nspawn")},
 		{"image directory " + cfg.Runner.ImagePath, checkDir(cfg.Runner.ImagePath)},
+		{"image btrfs subvolume " + cfg.Runner.ImagePath, checkBtrfs(cfg.Runner.ImagePath)},
 	}
 	for _, c := range checks {
 		if err := c.fn(); err != nil {
@@ -260,6 +262,30 @@ func checkDir(path string) func() error {
 		}
 		if !info.IsDir() {
 			return fmt.Errorf("%s is not a directory", path)
+		}
+		return nil
+	}
+}
+
+// btrfsSuperMagic is BTRFS_SUPER_MAGIC (0x9123683E). The custom image MUST be a
+// btrfs subvolume so systemd-nspawn --ephemeral CoW-snapshots it cheaply; a
+// plain directory on an ext4 (or btrfs-non-subvolume) backing would fall back
+// to a full copy per job. This check enforces the btrfs requirement at startup.
+const btrfsSuperMagic = 0x9123683E
+
+// checkBtrfs verifies that path resides on a btrfs filesystem and is a btrfs
+// subvolume. Enforced so the image always gets cheap CoW snapshots.
+func checkBtrfs(path string) func() error {
+	return func() error {
+		var fs syscall.Statfs_t
+		if err := syscall.Statfs(path, &fs); err != nil {
+			return fmt.Errorf("statfs %s: %w", path, err)
+		}
+		if fs.Type != btrfsSuperMagic {
+			return fmt.Errorf("%s is not on a btrfs filesystem (fstype=%d); the runner image must be a btrfs subvolume (see deploy/setup.sh)", path, fs.Type)
+		}
+		if out, err := exec.Command("btrfs", "subvolume", "show", path).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s is not a btrfs subvolume: %s", path, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
