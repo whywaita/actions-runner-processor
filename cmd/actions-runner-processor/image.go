@@ -186,8 +186,13 @@ func installFullFromRelease(owner, repo, tagName, imagePath string) error {
 	sort.Slice(parts, func(i, j int) bool { return parts[i].Name < parts[j].Name })
 	fmt.Printf("resolved %d parts for %s\n", len(parts), arch)
 
-	// Download parts and concatenate them into a temp file.
-	tmp, err := os.CreateTemp("", "actions-runner-image-full-*.tar.gz")
+	// Download parts and concatenate them into a temp file on the same
+	// filesystem as imagePath (NOT os.TempDir(): /tmp is often a small tmpfs,
+	// and the reconstructed tarball is many GB). Remove the file on return.
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		return fmt.Errorf("create temp dir %s: %w", filepath.Dir(imagePath), err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(imagePath), "actions-runner-image-full-*.tar.gz")
 	if err != nil {
 		return err
 	}
@@ -313,7 +318,12 @@ func installFullFromArtifact(ctx context.Context, auth client.GitHubAuth, owner,
 // extractArtifactZip unwraps a Actions artifact (zip) containing the image
 // tar.gz and expands it into dest.
 func extractArtifactZip(r io.Reader, dest string) error {
-	tmp, err := os.CreateTemp("", "actions-runner-image-*.zip")
+	// Write the zip to the imagePath filesystem (NOT os.TempDir(): /tmp is
+	// often a small tmpfs and the artifact is many GB).
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("create temp dir %s: %w", filepath.Dir(dest), err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "actions-runner-image-*.zip")
 	if err != nil {
 		return err
 	}
