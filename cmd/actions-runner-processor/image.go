@@ -7,7 +7,7 @@
 //
 //	actions-runner-processor image install-full --url <tarball-url> [--image-path <path>]
 //	actions-runner-processor image install-full \
-//	  --from-actions --owner <owner> --repo <repo> \
+//	  --from-actions [--owner <owner> --repo <repo>] \
 //	  [--artifact-prefix <prefix>] [--image-path <path>]
 //
 // which downloads the full-image artifact and expands it into the runner image
@@ -48,19 +48,19 @@ func runImageCmd(args []string) int {
 func usageImage() {
 	fmt.Fprintln(os.Stderr, `usage:
   actions-runner-processor image install-full --url <tarball-url> [--image-path <path>]
-  actions-runner-processor image install-full --from-actions --owner <owner> --repo <repo> [--artifact-prefix <prefix>] [--image-path <path>]
+  actions-runner-processor image install-full --from-actions [--owner <owner> --repo <repo>] [--artifact-prefix <prefix>] [--image-path <path>]
 
 Download and expand the full runner image into the image subvolume (btrfs enforced).
 Use --url for an operator-hosted tarball, or --from-actions to pull the latest
-build-image-full artifact from the repository's Actions runs.`)
+build-image-full artifact (defaults to whywaita/actions-runner-processor).`)
 }
 
 func cmdInstallFullImage(args []string) int {
 	fs := flag.NewFlagSet("image install-full", flag.ExitOnError)
 	url := fs.String("url", "", "URL of the full image tar.gz")
 	fromActions := fs.Bool("from-actions", false, "download the latest build-image-full artifact via GitHub App auth")
-	owner := fs.String("owner", "", "GitHub owner (required with --from-actions)")
-	repo := fs.String("repo", "", "GitHub repository (required with --from-actions)")
+	owner := fs.String("owner", "whywaita", "GitHub owner (default: whywaita)")
+	repo := fs.String("repo", "actions-runner-processor", "GitHub repository (default: actions-runner-processor)")
 	artifactPrefix := fs.String("artifact-prefix", "actions-runner-image-full", "artifact name prefix to match")
 	imagePath := fs.String("image-path", "", "runner image subvolume (default: config image_path or /opt/runner-btrfs/image)")
 	if err := fs.Parse(args); err != nil {

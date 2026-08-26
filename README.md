@@ -135,10 +135,11 @@ sudo actions-runner-processor image install-full --url https://example.com/actio
 
 2. Directly from the repository's Actions build artifacts (uses the GitHub App
    credentials from the config; no externally-hosted URL needed). This pulls
-   the most recent unexpired `actions-runner-image-full` artifact:
+   the most recent unexpired `actions-runner-image-full` artifact (defaults to
+   `whywaita/actions-runner-processor`; override with `--owner`/`--repo`):
 
 ```bash
-sudo actions-runner-processor image install-full --from-actions --owner <owner> --repo <repo>
+sudo actions-runner-processor image install-full --from-actions
 ```
 
 Both download, expand into the btrfs runner-image subvolume
