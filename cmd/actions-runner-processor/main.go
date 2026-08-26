@@ -315,7 +315,10 @@ func usage() {
 Usage:
   actions-runner-processor                     run the processor daemon
   actions-runner-processor image install-full  download + expand the full runner image
-    --url <tarball-url>                        URL of the full image tar.gz (required)
+    --url <tarball-url>                        URL of the full image tar.gz
+    --from-actions --owner <o> --repo <r>      pull the latest build-image-full artifact
+                                               (GitHub App auth from config; optional
+                                               --artifact-prefix <p>)
     --image-path <path>                        image subvolume (default: config image_path or /opt/runner-btrfs/image)
   actions-runner-processor help                show this help
 
