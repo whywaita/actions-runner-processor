@@ -24,6 +24,16 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "image":
+			os.Exit(runImageCmd(os.Args[2:]))
+		case "-h", "--help", "help":
+			usage()
+			os.Exit(0)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -296,4 +306,19 @@ func configPath() string {
 		return path
 	}
 	return "/etc/actions-runner-processor/config.yaml"
+}
+
+// usage prints the command-line help.
+func usage() {
+	fmt.Fprint(os.Stderr, `actions-runner-processor — a lightweight self-hosted GitHub Actions runner processor
+
+Usage:
+  actions-runner-processor                     run the processor daemon
+  actions-runner-processor image install-full  download + expand the full runner image
+    --url <tarball-url>                        URL of the full image tar.gz (required)
+    --image-path <path>                        image subvolume (default: config image_path or /opt/runner-btrfs/image)
+  actions-runner-processor help                show this help
+
+The runner image must be a btrfs subvolume (btrfs is enforced). See deploy/setup.sh.
+`)
 }

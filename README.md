@@ -124,6 +124,15 @@ sudo bash image/build-image-full.sh /tmp/runner-image-full
 # → /tmp/runner-image-full/actions-runner-image-full-amd64.tar.gz
 ```
 
+The full image is too large for a GitHub Release asset, so it is not shipped;
+after building/hosting it at a URL, install it onto the runner host with:
+
+```bash
+sudo actions-runner-processor image install-full --url https://example.com/actions-runner-image-full-amd64.tar.gz
+```
+
+This downloads, expands into the btrfs runner-image subvolume (`/opt/runner-btrfs/image`), and enforces the btrfs requirement.
+
 Expand it to `runner.image_path` the same way as the lightweight image.
 
 ### Configuration
