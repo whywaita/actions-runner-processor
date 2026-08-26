@@ -1,19 +1,16 @@
 // Subcommands for the actions-runner-processor binary.
 //
-// The full runner image is too large to ship on a GitHub Release (2GB/file
-// cap), so it is built on demand (build-image-full.yaml) and made available
-// either at a URL the operator controls or directly from the repository's
-// Actions build artifacts. This file implements:
+// The full runner image is too large for a single GitHub Release asset (2GB/file
+// cap), so build-image-full.yaml splits the tarball into <2GB parts and
+// publishes them to the release as
 //
-//	actions-runner-processor image install-full --url <tarball-url> [--image-path <path>]
-//	actions-runner-processor image install-full \
-//	  --from-actions [--owner <owner> --repo <repo>] \
-//	  [--artifact-prefix <prefix>] [--image-path <path>]
+//	actions-runner-image-full-<arch>.tar.gz.part-000, .part-001, ...
 //
-// which downloads the full-image artifact and expands it into the runner image
-// subvolume, enforcing the btrfs requirement. The --from-actions mode
-// authenticates as the configured GitHub App and pulls the most recent
-// unexpired build artifact, so no externally-hosted URL is required.
+// This file implements `image install-full`, which downloads the split parts
+// of the full image (default: the newest release; a specific release via
+// --release), concatenates them back into the tar.gz, and expands it into the
+// btrfs runner-image subvolume. Public release assets are read without
+// authentication, so any user can install the full image.
 package main
 
 import (
@@ -28,12 +25,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/whywaita/actions-runner-processor/internal/client"
 	"github.com/whywaita/actions-runner-processor/internal/config"
 )
+
+// fullImageAssetPrefix is the release-asset name prefix for split full-image parts.
+func fullImageAssetPrefix(arch string) string {
+	return fmt.Sprintf("actions-runner-image-full-%s.tar.gz.part-", arch)
+}
 
 // runImageCmd dispatches the `image` subcommand tree.
 func runImageCmd(args []string) int {
@@ -47,17 +51,20 @@ func runImageCmd(args []string) int {
 // usageImage prints the `image` subcommand usage.
 func usageImage() {
 	fmt.Fprintln(os.Stderr, `usage:
+  actions-runner-processor image install-full [--release <tag|release-url>] [--image-path <path>]
   actions-runner-processor image install-full --url <tarball-url> [--image-path <path>]
-  actions-runner-processor image install-full --from-actions [--owner <owner> --repo <repo>] [--artifact-prefix <prefix>] [--image-path <path>]
+  actions-runner-processor image install-full --from-actions [--owner <o> --repo <r>] [--artifact-prefix <p>] [--image-path <path>]
 
 Download and expand the full runner image into the image subvolume (btrfs enforced).
-Use --url for an operator-hosted tarball, or --from-actions to pull the latest
-build-image-full artifact (defaults to whywaita/actions-runner-processor).`)
+Default pulls the split parts of the newest release (no auth needed); --release
+selects a specific tag or release URL. --url fetches a single operator-hosted
+tarball; --from-actions pulls the latest build-image-full action artifact.`)
 }
 
 func cmdInstallFullImage(args []string) int {
 	fs := flag.NewFlagSet("image install-full", flag.ExitOnError)
-	url := fs.String("url", "", "URL of the full image tar.gz")
+	release := fs.String("release", "", "GitHub tag or release page URL to install (default: latest release)")
+	url := fs.String("url", "", "URL of a single full image tar.gz")
 	fromActions := fs.Bool("from-actions", false, "download the latest build-image-full artifact via GitHub App auth")
 	owner := fs.String("owner", "whywaita", "GitHub owner (default: whywaita)")
 	repo := fs.String("repo", "actions-runner-processor", "GitHub repository (default: actions-runner-processor)")
@@ -66,13 +73,18 @@ func cmdInstallFullImage(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *url == "" && !*fromActions {
-		fmt.Fprintln(os.Stderr, "error: specify --url or --from-actions")
-		fs.Usage()
-		return 2
+	modes := 0
+	if *release != "" {
+		modes++
 	}
-	if *url != "" && *fromActions {
-		fmt.Fprintln(os.Stderr, "error: --url and --from-actions are mutually exclusive")
+	if *url != "" {
+		modes++
+	}
+	if *fromActions {
+		modes++
+	}
+	if modes > 1 {
+		fmt.Fprintln(os.Stderr, "error: --release, --url and --from-actions are mutually exclusive")
 		fs.Usage()
 		return 2
 	}
@@ -85,7 +97,7 @@ func cmdInstallFullImage(args []string) int {
 		*imagePath = "/opt/runner-btrfs/image"
 	}
 
-	if err := installFullImage(*url, *fromActions, *owner, *repo, *artifactPrefix, *imagePath); err != nil {
+	if err := installFullImage(*release, *url, *fromActions, *owner, *repo, *artifactPrefix, *imagePath); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
@@ -93,56 +105,44 @@ func cmdInstallFullImage(args []string) int {
 }
 
 // installFullImage downloads the full runner image and expands it into the
-// image subvolume (replacing its contents). The source is either an
-// operator-hosted tarball URL or, when fromActions is set, the latest matching
-// build-image-full artifact pulled with GitHub App credentials from config.
-func installFullImage(url string, fromActions bool, owner, repo, artifactPrefix, imagePath string) error {
+// image subvolume (replacing its contents). The source is, in precedence:
+//   - --release: split parts of a specific or latest GitHub release (public, no auth)
+//   - --url: a single operator-hosted tar.gz
+//   - --from-actions: the latest build-image-full action artifact (GitHub App auth)
+func installFullImage(release, url string, fromActions bool, owner, repo, artifactPrefix, imagePath string) error {
 	if err := ensureImageSubvolume(imagePath); err != nil {
 		return err
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	auth := client.GitHubAuth{
-		ClientID:   cfg.GitHub.ClientID,
-		PrivateKey: cfg.GitHub.PrivateKey,
-		APIURL:     cfg.GitHub.APIURL,
-	}
-	ctx := context.Background()
-
-	var stream io.Reader
-	var closeFn func() error
-	if fromActions {
-		stream, closeFn, err = openArtifactStream(ctx, auth, owner, repo, artifactPrefix)
-	} else {
-		stream, closeFn, err = openHTTPStream(url)
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = closeFn() }()
-
-	// The artifact source is a zip that wraps the tar.gz; a bare URL is the
-	// tar.gz itself.
-	if fromActions {
-		fmt.Printf("expanding into %s\n", imagePath)
-		if err := extractArtifactZip(stream, imagePath); err != nil {
-			return fmt.Errorf("extract artifact: %w", err)
-		}
-	} else {
-		gr, err := gzip.NewReader(stream)
-		if err != nil {
-			return fmt.Errorf("open gzip stream: %w", err)
-		}
-		defer func() { _ = gr.Close() }()
-		if err := clearDir(imagePath); err != nil {
+	switch {
+	case release != "":
+		tag := resolveReleaseTag(release)
+		fmt.Printf("fetching split full image from release %s (%s)\n", tag, owner+"/"+repo)
+		if err := installFullFromRelease(owner, repo, tag, imagePath); err != nil {
 			return err
 		}
-		fmt.Printf("expanding into %s\n", imagePath)
-		if err := extractTar(gr, imagePath); err != nil {
-			return fmt.Errorf("extract: %w", err)
+	case url != "":
+		if err := installFullFromURL(url, imagePath); err != nil {
+			return err
+		}
+	case fromActions:
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		auth := client.GitHubAuth{
+			ClientID:   cfg.GitHub.ClientID,
+			PrivateKey: cfg.GitHub.PrivateKey,
+			APIURL:     cfg.GitHub.APIURL,
+		}
+		if err := installFullFromArtifact(context.Background(), auth, owner, repo, artifactPrefix, imagePath); err != nil {
+			return err
+		}
+	default:
+		// No source given: default to the latest release (no auth needed).
+		fmt.Printf("fetching split full image from the latest release (%s)\n", owner+"/"+repo)
+		if err := installFullFromRelease(owner, repo, "", imagePath); err != nil {
+			return err
 		}
 	}
 
@@ -154,30 +154,140 @@ func installFullImage(url string, fromActions bool, owner, repo, artifactPrefix,
 	return nil
 }
 
-// openHTTPStream opens a plain (optionally gzipped) tarball from url.
-func openHTTPStream(url string) (io.Reader, func() error, error) {
+// resolveReleaseTag normalizes --release: a tag ("v0.0.4") is used as-is; a
+// release page URL is reduced to its trailing tag.
+func resolveReleaseTag(release string) string {
+	if i := strings.LastIndex(release, "/releases/tag/"); i >= 0 {
+		return release[i+len("/releases/tag/"):]
+	}
+	return release
+}
+
+// installFullFromRelease downloads the split parts of the given release
+// (tagName=="" means the latest release) and expands the reconstructed tarball.
+func installFullFromRelease(owner, repo, tagName, imagePath string) error {
+	ctx := context.Background()
+	assets, err := client.ListReleaseAssets(ctx, owner, repo, tagName)
+	if err != nil {
+		return err
+	}
+	arch := runtime.GOARCH
+	prefix := fullImageAssetPrefix(arch)
+	var parts []client.ReleaseAsset
+	for _, a := range assets {
+		if strings.HasPrefix(a.Name, prefix) {
+			parts = append(parts, a)
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Errorf("release has no split full-image parts (prefix %q) for arch %s", prefix, arch)
+	}
+	// Order by the numeric part suffix (part-000, part-001, ...).
+	sort.Slice(parts, func(i, j int) bool { return parts[i].Name < parts[j].Name })
+	fmt.Printf("resolved %d parts for %s\n", len(parts), arch)
+
+	// Download parts and concatenate them into a temp file.
+	tmp, err := os.CreateTemp("", "actions-runner-image-full-*.tar.gz")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	for i, a := range parts {
+		fmt.Printf("downloading %s (%s)\n", a.Name, humanSize(a.Size))
+		resp, err := http.Get(a.DownloadURL)
+		if err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("download %s: %w", a.Name, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			_ = tmp.Close()
+			return fmt.Errorf("download %s: HTTP %s", a.Name, resp.Status)
+		}
+		if _, err := io.Copy(tmp, resp.Body); err != nil {
+			_ = resp.Body.Close()
+			_ = tmp.Close()
+			return fmt.Errorf("copy %s: %w", a.Name, err)
+		}
+		_ = resp.Body.Close()
+		_ = i
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	f, err := os.Open(tmpName)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("open gzip (concatenated parts may be corrupt): %w", err)
+	}
+	defer func() { _ = gr.Close() }()
+
+	if err := clearDir(imagePath); err != nil {
+		return err
+	}
+	fmt.Printf("expanding into %s\n", imagePath)
+	if err := extractTar(gr, imagePath); err != nil {
+		return err
+	}
+	return nil
+}
+
+// humanSize formats a byte count for progress output.
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for nld := n / unit; nld >= unit; nld /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// installFullFromURL downloads a single operator-hosted tar.gz and expands it.
+func installFullFromURL(url, imagePath string) error {
 	fmt.Printf("downloading %s\n", url)
 	resp, err := http.Get(url)
 	if err != nil {
-		return nil, nil, fmt.Errorf("download %s: %w", url, err)
+		return fmt.Errorf("download %s: %w", url, err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, nil, fmt.Errorf("download %s: HTTP %s", url, resp.Status)
+		return fmt.Errorf("download %s: HTTP %s", url, resp.Status)
 	}
-	return resp.Body, resp.Body.Close, nil
+	gr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("open gzip stream: %w", err)
+	}
+	defer func() { _ = gr.Close() }()
+	if err := clearDir(imagePath); err != nil {
+		return err
+	}
+	fmt.Printf("expanding into %s\n", imagePath)
+	if err := extractTar(gr, imagePath); err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+	return nil
 }
 
-// openArtifactStream resolves the latest matching artifact and returns a
-// reader over its zip payload plus a close function.
-func openArtifactStream(ctx context.Context, auth client.GitHubAuth, owner, repo, prefix string) (io.Reader, func() error, error) {
+// installFullFromArtifact resolves the latest matching action artifact and
+// expands it into dest. The artifact is a zip wrapping the image tar.gz.
+func installFullFromArtifact(ctx context.Context, auth client.GitHubAuth, owner, repo, prefix, imagePath string) error {
 	if owner == "" || repo == "" {
-		return nil, nil, fmt.Errorf("--owner and --repo are required with --from-actions")
+		return fmt.Errorf("--owner and --repo are required with --from-actions")
 	}
 	fmt.Printf("resolving latest artifact %q in %s/%s\n", prefix, owner, repo)
 	artifactID, err := client.LatestArtifact(ctx, auth, owner, repo, prefix, nil)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	fmt.Printf("downloading artifact %d\n", artifactID)
 
@@ -187,11 +297,12 @@ func openArtifactStream(ctx context.Context, auth client.GitHubAuth, owner, repo
 		defer func() { _ = w.Close() }()
 		done <- client.DownloadArtifact(ctx, auth, owner, repo, artifactID, w)
 	}()
-	close := func() error {
-		_ = r.Close()
-		return <-done
+	defer func() { _ = r.Close(); _ = <-done }()
+
+	if err := extractArtifactZip(r, imagePath); err != nil {
+		return fmt.Errorf("extract artifact: %w", err)
 	}
-	return r, close, nil
+	return nil
 }
 
 // extractArtifactZip unwraps a Actions artifact (zip) containing the image

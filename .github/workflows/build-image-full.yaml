@@ -16,7 +16,7 @@ on:
           - '24.04'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-full:
@@ -49,9 +49,25 @@ jobs:
           # container so the runner-images checkout is available).
           sudo bash image/build-image-full.sh /tmp/runner-image-full
 
-      - name: Upload full rootfs image
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: actions-runner-image-full
-          path: /tmp/runner-image-full/actions-runner-image-full-*.tar.gz
-          if-no-files-found: error
+      - name: Split full image into <2GB release parts
+        run: |
+          # The full image tarball exceeds GitHub's 2GB-per-asset cap, so split
+          # it into <2GB numeric parts (actions-runner-image-full-<arch>.tar.gz.part-000,
+          # .part-001, ...). image install-full re-concatenates them.
+          for tarball in /tmp/runner-image-full/actions-runner-image-full-*.tar.gz; do
+            echo ">>> splitting $tarball"
+            cd /tmp/runner-image-full
+            split -C 1900M -d -a 3 "$(basename "$tarball")" "$(basename "$tarball").part-"
+            rm -f "$(basename "$tarball")"
+            ls -la "$(basename "$tarball").part-"*
+          done
+
+      - name: Publish split parts to the latest release
+        run: |
+          # Upload the split parts to the newest release (created by tagpr),
+          # replacing any previous parts. gh is preinstalled on hosted runners.
+          TAG="$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+          echo ">>> latest release: $TAG"
+          cd /tmp/runner-image-full
+          gh release upload "$TAG" actions-runner-image-full-*.tar.gz.part-* --clobber
+          echo ">>> published split parts to $TAG"

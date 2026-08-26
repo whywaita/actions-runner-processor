@@ -124,26 +124,33 @@ sudo bash image/build-image-full.sh /tmp/runner-image-full
 # → /tmp/runner-image-full/actions-runner-image-full-amd64.tar.gz
 ```
 
-The full image is too large for a GitHub Release asset, so it is not shipped.
-Two ways to install it onto the runner host:
-
-1. From an operator-hosted URL:
+The full image is too large for a single GitHub Release asset (2GB/file cap),
+so it is built on demand (`build-image-full` workflow), split into <2GB parts,
+and published to the repository's **newest release** as
+`actions-runner-image-full-<arch>.tar.gz.part-000, .part-001, ...`.
+Install it onto the runner host with:
 
 ```bash
-sudo actions-runner-processor image install-full --url https://example.com/actions-runner-image-full-amd64.tar.gz
+# Default: newest release (no GitHub credentials needed)
+sudo actions-runner-processor image install-full
+
+# A specific release, by tag or release page URL
+sudo actions-runner-processor image install-full --release v0.0.5
+sudo actions-runner-processor image install-full --release https://github.com/whywaita/actions-runner-processor/releases/tag/v0.0.5
 ```
 
-2. Directly from the repository's Actions build artifacts (uses the GitHub App
-   credentials from the config; no externally-hosted URL needed). This pulls
-   the most recent unexpired `actions-runner-image-full` artifact (defaults to
-   `whywaita/actions-runner-processor`; override with `--owner`/`--repo`):
+There are also two lower-level sources:
 
 ```bash
+# A single operator-hosted tarball
+sudo actions-runner-processor image install-full --url https://example.com/actions-runner-image-full-amd64.tar.gz
+
+# The latest build-image-full action artifact (GitHub App auth from config)
 sudo actions-runner-processor image install-full --from-actions
 ```
 
-Both download, expand into the btrfs runner-image subvolume
-(`/opt/runner-btrfs/image`), and enforce the btrfs requirement.
+All modes download, concatenate/reconstruct, expand into the btrfs runner-image
+subvolume (`/opt/runner-btrfs/image`), and enforce the btrfs requirement.
 
 Expand it to `runner.image_path` the same way as the lightweight image.
 
@@ -345,6 +352,10 @@ golangci-lint run
 GitHub Actions workflows (`build` + `release`) are in `.github/workflows/`:
 
 - **build** — `go build`, `go test -race`, `go vet`, `golangci-lint` on PR
+- **build-image** — lightweight image artifact on push/PR (`image/**`)
+- **build-image-full** — heavy (1h, 50GB+) full-image build; dispatch-only.
+  Splits the tarball into <2GB parts and publishes them to the newest release
+  via `gh release upload --clobber`
 - **release** — tagpr + GoReleaser on main push or `v*` tag push
 
 GoReleaser produces `actions-runner-processor_<version>_linux_<arch>.tar.gz`
