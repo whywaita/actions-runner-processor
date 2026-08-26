@@ -145,11 +145,11 @@ ensure_image() {
 
   log "dispatch full image build on $GITHUB_REPO via GitHub Actions (≈1h)"
   command -v gh >/dev/null 2>&1 || die "gh CLI required for UPDATE_IMAGE=1"
-  gh workflow run build-image.yaml --repo "$GITHUB_REPO" --field type=full --field release=24.04
+  gh workflow run build-image-full.yaml --repo "$GITHUB_REPO" --field release=24.04
   echo "   waiting for the full image build to finish… (this takes ~1h)"
   sleep 30
   local run_id
-  run_id="$(gh run list --repo "$GITHUB_REPO" --workflow build-image.yaml --limit 1 --json databaseId --jq '.[0].databaseId')"
+  run_id="$(gh run list --repo "$GITHUB_REPO" --workflow build-image-full.yaml --limit 1 --json databaseId --jq '.[0].databaseId')"
   gh run watch "$run_id" --repo "$GITHUB_REPO" --exit-status || die "image build failed ($run_id)"
 
   local artdir

@@ -87,7 +87,8 @@ sudo OUTPUT_DIR=/tmp/img bash image/build-image.sh
 
 **Or let CI bake it** — `.github/workflows/build-image.yaml` runs
 `image/build-image.sh` (on `workflow_dispatch`, or on push/PR touching
-`image/**`) and uploads the rootfs tarball as an artifact.
+`image/**`) and uploads the rootfs tarball as an artifact. The full image uses
+a separate, dispatch-only workflow: `.github/workflows/build-image-full.yaml`.
 
 **Expand to the host** (`runner.image_path`, default `/opt/runner-btrfs/image`):
 
@@ -116,7 +117,7 @@ systemd-nspawn container, and runs the `actions/runner-images`
 `scripts/build/*.sh` scripts directly inside — no LXD or Packer needed
 (`actions/runner-images` build scripts are just a sequence of shell scripts;
 its Packer templates only loop over them). Trigger it via CI
-(`workflow_dispatch` → Type: **full**) or locally:
+(`workflow_dispatch` on the `build-image-full` workflow) or locally:
 
 ```bash
 sudo bash image/build-image-full.sh /tmp/runner-image-full
