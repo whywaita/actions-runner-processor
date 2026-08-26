@@ -193,27 +193,15 @@ func installFullFromRelease(owner, repo, tagName, imagePath string) error {
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	for i, a := range parts {
+	for _, a := range parts {
 		fmt.Printf("downloading %s (%s)\n", a.Name, humanSize(a.Size))
-		resp, err := http.Get(a.DownloadURL)
+		err = appendReleaseAssetPart(tmp, a)
 		if err != nil {
-			_ = tmp.Close()
-			return fmt.Errorf("download %s: %w", a.Name, err)
+			return err
 		}
-		if resp.StatusCode != http.StatusOK {
-			_ = resp.Body.Close()
-			_ = tmp.Close()
-			return fmt.Errorf("download %s: HTTP %s", a.Name, resp.Status)
-		}
-		if _, err := io.Copy(tmp, resp.Body); err != nil {
-			_ = resp.Body.Close()
-			_ = tmp.Close()
-			return fmt.Errorf("copy %s: %w", a.Name, err)
-		}
-		_ = resp.Body.Close()
-		_ = i
 	}
-	if err := tmp.Close(); err != nil {
+	err = tmp.Close()
+	if err != nil {
 		return err
 	}
 
@@ -234,6 +222,23 @@ func installFullFromRelease(owner, repo, tagName, imagePath string) error {
 	fmt.Printf("expanding into %s\n", imagePath)
 	if err := extractTar(gr, imagePath); err != nil {
 		return err
+	}
+	return nil
+}
+
+// appendReleaseAssetPart downloads a single split part asset and appends it to
+// the concatenation file f, preserving byte order for later reconstruction.
+func appendReleaseAssetPart(f *os.File, a client.ReleaseAsset) error {
+	resp, err := http.Get(a.DownloadURL)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", a.Name, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s: HTTP %s", a.Name, resp.Status)
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return fmt.Errorf("copy %s: %w", a.Name, err)
 	}
 	return nil
 }
@@ -297,7 +302,7 @@ func installFullFromArtifact(ctx context.Context, auth client.GitHubAuth, owner,
 		defer func() { _ = w.Close() }()
 		done <- client.DownloadArtifact(ctx, auth, owner, repo, artifactID, w)
 	}()
-	defer func() { _ = r.Close(); _ = <-done }()
+	defer func() { _ = r.Close(); <-done }()
 
 	if err := extractArtifactZip(r, imagePath); err != nil {
 		return fmt.Errorf("extract artifact: %w", err)
