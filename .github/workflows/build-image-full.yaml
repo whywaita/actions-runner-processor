@@ -49,6 +49,14 @@ jobs:
           # container so the runner-images checkout is available).
           sudo bash image/build-image-full.sh /tmp/runner-image-full
 
+      - name: Restore runner ownership of the image output
+        run: |
+          # build-image-full.sh runs under sudo, so the output dir and tarball
+          # end up root-owned. The split/publish steps run as the runner user,
+          # so hand ownership back before splitting.
+          sudo chown -R "$(id -u):$(id -g)" /tmp/runner-image-full
+          ls -la /tmp/runner-image-full
+
       - name: Split full image into <2GB release parts
         run: |
           # The full image tarball exceeds GitHub's 2GB-per-asset cap, so split
