@@ -248,14 +248,15 @@ image/
 ├── build-image.sh       # lightweight: debootstrap + chroot + tar.gz
 ├── image-full.yaml      # manifest for the full image
 ├── build-image-full.sh  # full: debootstrap + nspawn + runner-images scripts
-└── (built by) .github/workflows/build-image.yaml
+└── (built by) .github/workflows/build-image.yaml      # lightweight
+    and .github/workflows/build-image-full.yaml        # full (dispatch-only)
 ```
 
 **Lightweight (option B, default)** — `image/build-image.sh` debootstraps the
 base, applies the apt packages from `image/image.yaml` and installs
 `actions/runner` at `/opt/actions-runner` inside a chroot, then packs the
 rootfs into `actions-runner-image-<arch>.tar.gz`. Fast (minutes), runs on
-PRs/pushes and `workflow_dispatch`.
+PRs/pushes and `workflow_dispatch` via `.github/workflows/build-image.yaml`.
 
 **What the lightweight image contains:**
 
@@ -278,7 +279,9 @@ GitHub-hosted-compatible toolset. `actions/runner-images` is built by running
 loop over these shell scripts), so this script debootstraps a base, boots it
 in a `systemd-nspawn` container (`--boot`), and runs the same build scripts
 directly inside with the repo bind-mounted. **No LXD or Packer is needed.**
-Heavy (~1h, 50GB+), gated on `workflow_dispatch` → Type: **full**.
+Heavy (~1h, 50GB+), gated on `workflow_dispatch` via the
+`.github/workflows/build-image-full.yaml` workflow (separate from the
+lightweight build so the PR view stays clean).
 
 The tarball is expanded to `runner.image_path` (default `/opt/runner-btrfs/image`):
 

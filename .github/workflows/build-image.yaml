@@ -1,36 +1,12 @@
-# Build the actions-runner-processor custom runner image (nspawn rootfs).
-#
-# Two image types are produced, both as a rootfs .tar.gz that you expand to
-# runner.image_path (default /opt/runner-btrfs/image):
-#
-#   build        — lightweight rootfs (debootstrap + a few apt packages),
-#                  fast, runs on pull_request / push / workflow_dispatch.
-#   build-full   — full GitHub-hosted-compatible toolset (Packer + LXD,
-#                  mirroring actions-runner-images-lxd). Heavy (~1h, 50GB+),
-#                  so it runs only on workflow_dispatch via the "Type" input.
-#
-# The ubuntu-latest runner is root, so debootstrap/chroot work directly.
+# Build the lightweight actions-runner-processor custom runner image (nspawn
+# rootfs). Expand the artifact to runner.image_path
+# (default /opt/runner-btrfs/image). The heavy full image is built separately by
+# build-image-full.yaml (dispatch-only), so this workflow stays fast and never
+# shows pairing/duplicate jobs on a PR.
 name: build-image
 
 on:
   workflow_dispatch:
-    inputs:
-      type:
-        description: 'Image type to build'
-        required: true
-        default: 'lightweight'
-        type: choice
-        options:
-          - lightweight
-          - full
-      release:
-        description: 'Ubuntu release for the full image (22.04 or 24.04)'
-        required: false
-        default: '24.04'
-        type: choice
-        options:
-          - '22.04'
-          - '24.04'
   push:
     paths:
       - 'image/**'
@@ -45,9 +21,6 @@ permissions:
 
 jobs:
   build:
-    # Runs for PRs/pushes/lightweight dispatch. Full builds are handled by the
-    # build-full job below, so the lightweight job only runs once.
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.type == 'full') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,7 +40,7 @@ jobs:
 
       - name: Smoke-test that the runner binary is present
         run: |
-          IMG="/tmp/runner-image/actions-runner-image-$(awk '/^arch:/{gsub(/"/,"",$2); print $2}' image/image.yaml).tar.gz"
+          IMG="/tmp/runner-image/actions-runner-image-$(awk '/^arch:/{gsub(/\"/,"",$2); print $2}' image/image.yaml).tar.gz"
           # Consume the full tar listing before grepping: with `tar | grep -q`
           # under pipefail, grep -q closes the pipe as soon as it matches,
           # SIGPIPEs tar (exit 141), and the step fails even when the file is
@@ -82,43 +55,4 @@ jobs:
         with:
           name: actions-runner-image
           path: /tmp/runner-image/actions-runner-image-*.tar.gz
-          if-no-files-found: error
-
-  build-full:
-    # Only triggered explicitly via workflow_dispatch (full). Heavy build.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.type == 'full' }}
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install systemd-container, debootstrap and shellcheck
-        run: |
-          sudo apt-get update -y -qq
-          sudo apt-get install -y -qq systemd-container debootstrap shellcheck
-
-      - name: Lint image shell scripts
-        run: shellcheck image/build-image.sh image/build-image-full.sh
-
-      - name: Free disk space for the full image build
-        run: |
-          # The full builder reaches tens of GB (toolchains + apt). GitHub-hosted
-          # ubuntu-24.04 runners ship with heavy preinstalled toolchains, so
-          # clear the ones this build doesn't need to avoid ENOSPC mid-build.
-          sudo rm -rf /opt/hostedtoolcache /usr/share/dotnet \
-            /usr/local/lib/android /opt/ghc
-          df -h / | tail -1
-
-      - name: Build full rootfs
-        run: |
-          # Override the release manifest value via the dispatch input.
-          sudo sed -i "s/^release:.*/release: \"${{ inputs.release }}\"/" image/image-full.yaml
-          # Build in the repo (build-image-full.sh binds the repo into the
-          # container so the runner-images checkout is available).
-          sudo bash image/build-image-full.sh /tmp/runner-image-full
-
-      - name: Upload full rootfs image
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: actions-runner-image-full
-          path: /tmp/runner-image-full/actions-runner-image-full-*.tar.gz
           if-no-files-found: error
