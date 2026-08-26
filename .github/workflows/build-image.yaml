@@ -1,0 +1,58 @@
+# Build the lightweight actions-runner-processor custom runner image (nspawn
+# rootfs). Expand the artifact to runner.image_path
+# (default /opt/runner-btrfs/image). The heavy full image is built separately by
+# build-image-full.yaml (dispatch-only), so this workflow stays fast and never
+# shows pairing/duplicate jobs on a PR.
+name: build-image
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'image/**'
+      - '.github/workflows/build-image.yaml'
+  pull_request:
+    paths:
+      - 'image/**'
+      - '.github/workflows/build-image.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install debootstrap and shellcheck
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq debootstrap shellcheck
+
+      - name: Lint image shell scripts
+        run: shellcheck image/build-image.sh
+
+      - name: Build rootfs
+        run: |
+          # GitHub runner runs as root; OUTPUT_DIR under /tmp is fine.
+          sudo bash image/build-image.sh /tmp/runner-image
+
+      - name: Smoke-test that the runner binary is present
+        run: |
+          IMG="/tmp/runner-image/actions-runner-image-$(awk '/^arch:/{gsub(/\"/,"",$2); print $2}' image/image.yaml).tar.gz"
+          # Consume the full tar listing before grepping: with `tar | grep -q`
+          # under pipefail, grep -q closes the pipe as soon as it matches,
+          # SIGPIPEs tar (exit 141), and the step fails even when the file is
+          # present. Capture the listing first so tar completes.
+          ENTRIES="$(tar tzf "$IMG")"
+          echo "$ENTRIES" | grep -q 'opt/actions-runner/run.sh' \
+            && echo "runner run.sh present" \
+            || { echo "run.sh missing in image"; exit 1; }
+
+      - name: Upload rootfs image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: actions-runner-image
+          path: /tmp/runner-image/actions-runner-image-*.tar.gz
+          if-no-files-found: error

@@ -4,12 +4,35 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=actions-runner-processor
-Group=actions-runner-processor
+# systemd-nspawn needs privileges to set up namespace/overlay mounts, so the
+# processor runs as root (the runner inside the container also runs as root,
+# which is what makes `sudo` available in job steps).
 ExecStart=/usr/bin/actions-runner-processor
 Restart=always
 RestartSec=10
 Environment=CONFIG_PATH=/etc/actions-runner-processor/config.yaml
+
+# On SIGTERM/SIGINT the processor stops acquiring jobs and drains in-flight
+# runners (see runner.shutdown_grace_timeout, default 10m) before exiting, so
+# runner containers are not killed mid-job. TimeoutStopSec must exceed the
+# configured grace period -- if it is lower, systemd will SIGKILL the whole
+# cgroup (including nspawn children) before the drain can finish, defeating the
+# graceful shutdown. Keep this in sync with shutdown_grace_timeout.
+TimeoutStopSec=660
+
+# CRITICAL for graceful shutdown: without KillMode=process (the default is
+# control-group), systemd sends SIGTERM/SIGKILL to the ENTIRE cgroup on
+# restart/stop -- including every nspawn child. That would SIGKILL the runner
+# containers mid-job before this unit's process ever runs its drain logic
+# (observed as "Container ... terminated by signal KILL" + GitHub "lost
+# communication"). With KillMode=mixed, systemd signals ONLY the processor main
+# process on stop/restart, letting it drain in-flight jobs before exiting;
+# after TimeoutStopSec it SIGKILLs any cgroup members still alive. This still
+# gives the processor full ownership of its nspawn children during graceful
+# drain, while ALSO reaping any orphaned containers on an unexpected crash
+# (KillMode=process would leave them behind and Restart=always would then run
+# a second processor alongside stale runners).
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

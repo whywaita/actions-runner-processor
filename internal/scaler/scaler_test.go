@@ -5,10 +5,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/whywaita/actions-runner-processor/internal/runner"
@@ -31,37 +30,11 @@ func (f *fakeScaleSetClient) RemoveRunner(_ context.Context, runnerID int64) err
 	return nil
 }
 
-func TestHandleJobCompletedWaitsForRunnerToExit(t *testing.T) {
-	t.Parallel()
-
-	workspaceRoot := t.TempDir()
-	runnerName := "runner-test"
-	workspaceDir := filepath.Join(workspaceRoot, runnerName)
-	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	s := New(nil, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil)
-	s.runners[runnerName] = &runner.Runner{Name: runnerName}
-
-	err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: runnerName})
-	if err != nil {
-		t.Fatalf("HandleJobCompleted() error = %v", err)
-	}
-	if _, err := os.Stat(workspaceDir); err != nil {
-		t.Fatalf("workspace removed before runner exited: %v", err)
-	}
-	if _, ok := s.runners[runnerName]; !ok {
-		t.Fatal("runner removed before process exited")
-	}
-}
-
 func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeScaleSetClient{jitRunnerID: 42}
-	workspaceRoot := t.TempDir()
-	s := New(client, 1, 1, 0, "/srv/actions-runner", workspaceRoot, nil)
+	s := New(client, 1, 1, 0, nil, "/srv/image")
 	s.launch = func(context.Context, *runner.Runner) error {
 		return errors.New("launch failed")
 	}
@@ -75,11 +48,34 @@ func TestStartRunnerRemovesRegistrationWhenLaunchFails(t *testing.T) {
 	}
 }
 
+func TestStartRunnerSetsImageAndEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeScaleSetClient{jitRunnerID: 7}
+	s := New(client, 1, 1, 0, nil, "/srv/image")
+
+	var got *runner.Runner
+	s.launch = func(_ context.Context, r *runner.Runner) error {
+		got = r
+		return nil
+	}
+
+	if err := s.startRunner(context.Background()); err != nil {
+		t.Fatalf("startRunner() error = %v", err)
+	}
+	if got.ImagePath != "/srv/image" {
+		t.Errorf("ImagePath = %q, want /srv/image", got.ImagePath)
+	}
+	if got.JITConfig != "jit-config" || got.Name == "" {
+		t.Errorf("runner fields not populated: %+v", got)
+	}
+}
+
 func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
-	s := New(nil, 1, 0, 0, "/srv/actions-runner", t.TempDir(), nil)
+	s := New(nil, 1, 0, 0, nil, "/srv/image")
 	s.logger = slog.New(slog.NewJSONHandler(&output, nil))
 
 	for _, count := range []int{0, 0, 1, 1, 0, 1} {
@@ -90,5 +86,83 @@ func TestHandleDesiredRunnerCountLogsOnlyWhenAssignedJobsIncrease(t *testing.T) 
 
 	if got := strings.Count(output.String(), `"msg":"scaling"`); got != 2 {
 		t.Fatalf("scaling log count = %d, want 2; output = %s", got, output.String())
+	}
+}
+
+func TestHandleJobStartedMarksBusy(t *testing.T) {
+	t.Parallel()
+
+	s := New(nil, 1, 1, 0, nil, "/srv/image")
+	r := &runner.Runner{Name: "runner-busy"}
+	s.mu.Lock()
+	s.runners["runner-busy"] = r
+	s.mu.Unlock()
+
+	if r.IsBusy() {
+		t.Fatal("runner busy before JobStarted")
+	}
+	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: "runner-busy"}); err != nil {
+		t.Fatalf("HandleJobStarted error = %v", err)
+	}
+	if !r.IsBusy() {
+		t.Fatal("runner not busy after JobStarted")
+	}
+
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "runner-busy", Result: "success"}); err != nil {
+		t.Fatalf("HandleJobCompleted error = %v", err)
+	}
+	if r.IsBusy() {
+		t.Fatal("runner still busy after JobCompleted")
+	}
+}
+
+func TestShutdownNoRunners(t *testing.T) {
+	t.Parallel()
+
+	s := New(nil, 1, 1, 0, nil, "/srv/image")
+
+	// Must return immediately and not hang when there is nothing tracked.
+	done := make(chan struct{})
+	go func() {
+		s.Shutdown(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown with no runners did not return")
+	}
+}
+
+func TestShutdownForceKillsOnExpiredContext(t *testing.T) {
+	t.Parallel()
+
+	s := New(nil, 1, 1, 0, nil, "/srv/image")
+
+	// Seed a runner that is idle (no output yet -> RunningJob() == false).
+	// Its cmd is nil, so Kill() is a no-op. With an already-cancelled context
+	// the grace loop must not spin forever: it force-kills and returns.
+	s.mu.Lock()
+	s.runners["runner-idle"] = &runner.Runner{Name: "runner-idle"}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.Shutdown(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown with expired context did not return")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.runners) != 0 {
+		t.Fatalf("runners not cleared after force-kill shutdown, len = %d", len(s.runners))
 	}
 }

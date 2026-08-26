@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -221,6 +222,184 @@ func resolveScope(inst installationResponse, baseURL string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported account type: %s", inst.Account.Type)
 	}
+}
+
+// resolveInstallationID finds the GitHub App installation that grants access
+// to owner/repo, so we can mint a repo-scoped installation access token.
+func resolveInstallationID(ctx context.Context, apiURL, owner, repo, jwtToken string) (int64, error) {
+	path := apiURL + "/repos/" + owner + "/" + repo + "/installation"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create installation request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("get repo installation: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("get repo installation %s/%s: %s (status %d)", owner, repo, statusText(resp), resp.StatusCode)
+	}
+	var inst struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&inst); err != nil {
+		return 0, fmt.Errorf("decode installation: %w", err)
+	}
+	return inst.ID, nil
+}
+
+// createInstallationToken mints a short-lived repo-scoped installation access
+// token for the given installation ID.
+func createInstallationToken(ctx context.Context, apiURL string, installationID int64, jwtToken string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/app/installations/%d/access_tokens", apiURL, installationID), nil)
+	if err != nil {
+		return "", fmt.Errorf("create token request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("get installation access token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("get installation access token: %s (status %d)", statusText(resp), resp.StatusCode)
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+		return "", fmt.Errorf("decode token: %w", err)
+	}
+	return tok.Token, nil
+}
+
+// statusText reads a short response body for error messages.
+func statusText(resp *http.Response) string {
+	b, _ := io.ReadAll(resp.Body)
+	return strings.TrimSpace(string(b))
+}
+
+// LatestArtifact resolves the most recent successful Actions artifact whose
+// name starts with namePrefix from owner/repo, returning its id. The artifact
+// list is scoped to the installation token of the GitHub App owning owner/repo.
+func LatestArtifact(ctx context.Context, auth GitHubAuth, owner, repo, namePrefix string, health func(artifactName string)) (artifactID int64, err error) {
+	apiURL := auth.APIURL
+	if apiURL == "" {
+		apiURL = "https://api.github.com"
+	}
+	jwtToken, err := createAppJWT(auth.ClientID, auth.PrivateKey)
+	if err != nil {
+		return 0, fmt.Errorf("create JWT: %w", err)
+	}
+	installationID, err := resolveInstallationID(ctx, apiURL, owner, repo, jwtToken)
+	if err != nil {
+		return 0, err
+	}
+	token, err := createInstallationToken(ctx, apiURL, installationID, jwtToken)
+	if err != nil {
+		return 0, err
+	}
+
+	page := 1
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			fmt.Sprintf("%s/repos/%s/%s/actions/artifacts?per_page=100&page=%d", apiURL, owner, repo, page), nil)
+		if err != nil {
+			return 0, fmt.Errorf("create artifacts request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, fmt.Errorf("list artifacts: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			// GHES treats repo-scoped token with denied actions:read with 403.
+			return 0, fmt.Errorf("list artifacts: status %d: grant the GitHub App 'Actions: read' permission", resp.StatusCode)
+		}
+		var data struct {
+			Artifacts []struct {
+				ID      int64  `json:"id"`
+				Name    string `json:"name"`
+				Expired bool   `json:"expired"`
+			} `json:"artifacts"`
+			TotalCount int `json:"total_count"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			_ = resp.Body.Close()
+			return 0, fmt.Errorf("decode artifacts: %w", err)
+		}
+		_ = resp.Body.Close()
+
+		for _, a := range data.Artifacts {
+			if a.Expired || !strings.HasPrefix(a.Name, namePrefix) {
+				continue
+			}
+			if health != nil {
+				health(a.Name)
+			}
+			return a.ID, nil
+		}
+		if page*100 >= data.TotalCount || len(data.Artifacts) == 0 {
+			break
+		}
+		page++
+	}
+	return 0, fmt.Errorf("no unexpired artifact with name prefix %q found in %s/%s", namePrefix, owner, repo)
+}
+
+// DownloadArtifact downloads the given Actions artifact as a zip and writes it
+// to w. The request is authenticated with a repo-scoped installation token.
+func DownloadArtifact(ctx context.Context, auth GitHubAuth, owner, repo string, artifactID int64, w io.Writer) error {
+	apiURL := auth.APIURL
+	if apiURL == "" {
+		apiURL = "https://api.github.com"
+	}
+	jwtToken, err := createAppJWT(auth.ClientID, auth.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("create JWT: %w", err)
+	}
+	installationID, err := resolveInstallationID(ctx, apiURL, owner, repo, jwtToken)
+	if err != nil {
+		return err
+	}
+	token, err := createInstallationToken(ctx, apiURL, installationID, jwtToken)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/repos/%s/%s/actions/artifacts/%d/zip", apiURL, owner, repo, artifactID), nil)
+	if err != nil {
+		return fmt.Errorf("create artifact download request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	// Artifacts redirect to Azure/blob signed URLs: do not forward the token.
+	req.Header.Set("Authorization-Forwarded", "")
+	client := &http.Client{CheckRedirect: func(r *http.Request, via []*http.Request) error {
+		// On redirect, strip Authorization so the signed URL is used anonymously.
+		r.Header.Del("Authorization")
+		return nil
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download artifact: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download artifact: status %d", resp.StatusCode)
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("download artifact body: %w", err)
+	}
+	return nil
 }
 
 // createAppJWT generates a JWT for GitHub App authentication.

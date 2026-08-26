@@ -2,74 +2,159 @@ package runner
 
 import (
 	"bytes"
-	"slices"
+	"strings"
 	"testing"
 )
 
-func TestBuildArgsUsesBubblewrapTemporaryOverlays(t *testing.T) {
+func TestSetBusy(t *testing.T) {
 	t.Parallel()
 
-	r := &Runner{
-		ActionsRunnerPath: "/srv/actions-runner",
-		WorkDir:           "/srv/workspaces/runner-1234",
-		MaskedPaths:       []string{"/etc/custom/key.pem", "/etc/custom/config.yaml", "/home/hidden-by-sandbox.pem"},
+	r := &Runner{}
+	if r.IsBusy() {
+		t.Fatal("IsBusy() = true initially, want false")
 	}
-
-	args := buildArgs(r)
-
-	wantSequences := [][]string{
-		{"--overlay-src", "/usr", "--tmp-overlay", "/usr"},
-		{"--overlay-src", "/etc", "--tmp-overlay", "/etc"},
-		{"--overlay-src", "/var", "--tmp-overlay", "/var"},
-		{"--overlay-src", "/srv/actions-runner", "--tmp-overlay", "/actions-runner"},
-		{"--tmpfs", "/run", "--dir", "/run/systemd", "--dir", "/run/systemd/resolve"},
-		{"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"},
-		{"--ro-bind", "/dev/null", "/etc/custom/key.pem"},
-		{"--ro-bind", "/dev/null", "/etc/custom/config.yaml"},
-		{"--bind", "/srv/workspaces/runner-1234", "/actions-runner/_work"},
-		{"--uid", "0", "--gid", "0"},
+	r.SetBusy(true)
+	if !r.IsBusy() {
+		t.Fatal("IsBusy() = false after SetBusy(true), want true")
 	}
+	r.SetBusy(false)
+	if r.IsBusy() {
+		t.Fatal("IsBusy() = true after SetBusy(false), want false")
+	}
+}
 
-	for _, want := range wantSequences {
-		if !containsSequence(args, want) {
-			t.Errorf("buildArgs() = %q, want sequence %q", args, want)
+func TestIsWithin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		path string
+		root string
+		want bool
+	}{
+		{"/etc/custom/key.pem", "/etc", true},
+		{"/etc/hosts", "/etc", true},
+		{"/home/hidden.pem", "/etc", false},
+		{"/etc/..", "/etc", false},
+		{"/etc2/foo", "/etc", false},
+		{"/opt/runner/foo", "/opt", true},
+	}
+	for _, tt := range tests {
+		if got := isWithin(tt.path, tt.root); got != tt.want {
+			t.Errorf("isWithin(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
 		}
-	}
-
-	if slices.Contains(args, "fuse-overlayfs") {
-		t.Errorf("buildArgs() = %q, must not use fuse-overlayfs", args)
-	}
-	if slices.Contains(args, "/home/hidden-by-sandbox.pem") {
-		t.Errorf("buildArgs() = %q, must not mount a mask outside /etc", args)
-	}
-	if indexOf(args, "--tmpfs", "/run") > indexOf(args, "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf") {
-		t.Errorf("buildArgs() must create /run before binding /etc/resolv.conf: %q", args)
 	}
 }
 
 func TestOutput(t *testing.T) {
 	t.Parallel()
 
-	r := &Runner{output: bytes.NewBufferString("runner diagnostic")}
+	r := &Runner{output: &syncBuffer{buf: *bytes.NewBufferString("runner diagnostic")}}
 	if got := r.Output(); got != "runner diagnostic" {
 		t.Fatalf("Output() = %q, want runner diagnostic", got)
 	}
 }
 
-func containsSequence(values, sequence []string) bool {
-	for i := 0; i+len(sequence) <= len(values); i++ {
-		if slices.Equal(values[i:i+len(sequence)], sequence) {
-			return true
-		}
+func TestRunningJob(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"nil output", "", false},
+		{"empty output", "", false},
+		{"still booting listener", "Connected to GitHub\nListening for Jobs", false},
+		{"mid job", "Running job: test\ngo test ./...\n", true},
 	}
-	return false
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r *Runner
+			if tt.output == "" {
+				r = &Runner{output: nil}
+			} else {
+				r = &Runner{output: &syncBuffer{buf: *bytes.NewBufferString(tt.output)}}
+			}
+			if got := r.RunningJob(); got != tt.want {
+				t.Errorf("RunningJob() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
-func indexOf(values []string, sequence ...string) int {
-	for i := 0; i+len(sequence) <= len(values); i++ {
-		if slices.Equal(values[i:i+len(sequence)], sequence) {
-			return i
+func TestNspawnArgs(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{
+		Name:        "runner-eaa075e1",
+		JITConfig:   "some-jit-config",
+		ImagePath:   "/opt/runner-btrfs/image",
+		MaskedPaths: []string{"/etc/actions-runner-processor/config.yaml", "/home/secret.pem"},
+	}
+	args := nspawnArgs(r)
+
+	// The argument list is order-sensitive; verify it positionally.
+	wantPrefix := []string{
+		"--quiet",
+		"--directory=/opt/runner-btrfs/image",
+		"--ephemeral",
+		"--boot",
+		"--network-zone=rn-eaa075e1",
+		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
+		"--machine=runner-eaa075e1",
+		"--bind-ro=/run/actions-runner-processor/runner-eaa075e1.jitconfig:/opt/actions-runner/.jitconfig",
+		"--bind-ro=/dev/null:/etc/actions-runner-processor/config.yaml",
+	}
+	for i := range wantPrefix {
+		if args[i] != wantPrefix[i] {
+			t.Fatalf("nspawnArgs() prefix[%d] = %q, want %q\ngot:  %v", i, args[i], wantPrefix[i], args)
 		}
 	}
-	return -1
+
+	// No writable --bind and no credential on argv: with --ephemeral the whole
+	// root (including /opt/actions-runner/_work) is a discarded real-disk CoW
+	// snapshot, and the JIT secret travels via the bind-mounted protected file.
+	for _, a := range args {
+		if a == "--bind" {
+			t.Fatalf("unexpected writable --bind in args: %v", args)
+		}
+		if strings.HasPrefix(a, "--setenv=") {
+			t.Fatalf("JIT credential must not be passed on argv, got --setenv: %v", args)
+		}
+		if a == "/opt/actions-runner/run.sh" || a == "/opt/actions-runner/entrypoint.sh" {
+			t.Fatalf("entrypoint must not be passed as an arg (baked systemd unit runs it): %v", args)
+		}
+	}
+
+	// The /home/secret.pem masked path is outside /etc and must be skipped, and
+	// the /etc masked path must be a single SRC:DEST token (not two separate
+	// args, which would make nspawn exec the bare path as command).
+	for _, a := range args {
+		if a == "/etc/actions-runner-processor/config.yaml" {
+			t.Errorf("masked /etc path leaked as a bare arg (must be a single --bind-ro=/dev/null:SRC:DEST token): %v", args)
+		}
+		if a == "/home/secret.pem" {
+			t.Errorf("non-/etc path leaked into args: %v", args)
+		}
+	}
+}
+
+func TestNspawnArgsNoJIT(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{
+		Name:      "runner-eaa075e1",
+		JITConfig: "",
+		ImagePath: "/opt/runner-btrfs/image",
+	}
+	args := nspawnArgs(r)
+
+	for _, a := range args {
+		if strings.Contains(a, ".jitconfig") {
+			t.Fatalf("no JIT bind expected when JITConfig is empty, got: %v", args)
+		}
+		if strings.HasPrefix(a, "--setenv=") {
+			t.Fatalf("no --setenv expected when JITConfig is empty, got: %v", args)
+		}
+	}
 }

@@ -1,6 +1,6 @@
 // actions-runner-processor is a lightweight GitHub Actions self-hosted runner processor.
 // It discovers GitHub App installations, creates runner scale sets, and
-// launches ephemeral runners in bubblewrap sandboxes.
+// launches ephemeral runners in systemd-nspawn containers.
 package main
 
 import (
@@ -10,9 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,9 +23,17 @@ import (
 	"github.com/whywaita/actions-runner-processor/internal/webui"
 )
 
-var runnerWorkspacePattern = regexp.MustCompile(`^runner-[0-9a-f]{8}$`)
-
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "image":
+			os.Exit(runImageCmd(os.Args[2:]))
+		case "-h", "--help", "help":
+			usage()
+			os.Exit(0)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -43,15 +48,6 @@ func main() {
 		slog.Error("preflight check failed", "error", perr)
 		os.Exit(1)
 	}
-	removedWorkspaces, err := cleanupRunnerWorkspaces(cfg.Runner.WorkspaceRoot)
-	if err != nil {
-		slog.Error("failed to clean stale runner workspaces", "error", err)
-		os.Exit(1)
-	}
-	if removedWorkspaces > 0 {
-		slog.Info("cleaned stale runner workspaces", "count", removedWorkspaces)
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -96,6 +92,8 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
+	var scalersMu sync.Mutex
+	var scalers []*scaler.Scaler
 
 	for _, inst := range installations {
 		wg.Add(1)
@@ -165,12 +163,14 @@ func main() {
 				scaleSet.ID,
 				maxRunners,
 				cfg.Runner.MinRunners,
-				cfg.Runner.ActionsRunnerPath,
-				cfg.Runner.WorkspaceRoot,
 				[]string{configPath(), cfg.GitHub.PrivateKeyPath},
+				cfg.Runner.ImagePath,
 			)
 			registry.Register(inst.Scope, s)
 			webRegistry.Register(inst.Scope, s)
+			scalersMu.Lock()
+			scalers = append(scalers, s)
+			scalersMu.Unlock()
 
 			l, err := listener.New(session, listener.Config{
 				ScaleSetID: scaleSet.ID,
@@ -191,6 +191,29 @@ func main() {
 
 	wg.Wait()
 	slog.Info("all listeners stopped")
+
+	// Graceful shutdown: listeners have stopped (no new job acquisition), so now
+	// drain the runners that may still be executing in-flight jobs. Without this
+	// wait the process would exit immediately and systemd would SIGKILL the whole
+	// cgroup -- including any nspawn containers mid-job, losing the job. See
+	// scaler.Scaler.Shutdown for the drain semantics.
+	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Runner.ShutdownGraceTimeout.Duration)
+	defer drainCancel()
+
+	scalersMu.Lock()
+	toDrain := append([]*scaler.Scaler(nil), scalers...)
+	scalersMu.Unlock()
+
+	var drainWG sync.WaitGroup
+	for _, s := range toDrain {
+		drainWG.Add(1)
+		go func(s *scaler.Scaler) {
+			defer drainWG.Done()
+			s.Shutdown(drainCtx)
+		}(s)
+	}
+	drainWG.Wait()
+	slog.Info("all runners drained")
 }
 
 // setupLogging configures the default slog handler based on logFormat.
@@ -218,19 +241,16 @@ func preflight(cfg *config.Config) error {
 		name string
 		fn   func() error
 	}{
-		{"bwrap binary", checkBinary("bwrap")},
-		{"bwrap --tmp-overlay support", checkCommandOption("bwrap", "--tmp-overlay")},
-		{"actions-runner directory", checkDir(cfg.Runner.ActionsRunnerPath)},
-		{"workspaces directory", checkDir(cfg.Runner.WorkspaceRoot)},
+		{"systemd-nspawn binary", checkBinary("systemd-nspawn")},
+		{"image directory " + cfg.Runner.ImagePath, checkDir(cfg.Runner.ImagePath)},
+		{"image btrfs subvolume " + cfg.Runner.ImagePath, checkBtrfs(cfg.Runner.ImagePath)},
 	}
-
 	for _, c := range checks {
 		if err := c.fn(); err != nil {
 			return fmt.Errorf("%s: %w", c.name, err)
 		}
 		slog.Info("preflight check passed", "check", c.name)
 	}
-
 	return nil
 }
 
@@ -257,21 +277,28 @@ func checkDir(path string) func() error {
 	}
 }
 
-func checkCommandOption(name, option string) func() error {
+// btrfsSuperMagic is BTRFS_SUPER_MAGIC (0x9123683E). The custom image MUST be a
+// btrfs subvolume so systemd-nspawn --ephemeral CoW-snapshots it cheaply; a
+// plain directory on an ext4 (or btrfs-non-subvolume) backing would fall back
+// to a full copy per job. This check enforces the btrfs requirement at startup.
+const btrfsSuperMagic = 0x9123683E
+
+// checkBtrfs verifies that path resides on a btrfs filesystem and is a btrfs
+// subvolume. Enforced so the image always gets cheap CoW snapshots.
+func checkBtrfs(path string) func() error {
 	return func() error {
-		output, err := exec.Command(name, "--help").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("run %s --help: %w", name, err)
+		var fs syscall.Statfs_t
+		if err := syscall.Statfs(path, &fs); err != nil {
+			return fmt.Errorf("statfs %s: %w", path, err)
 		}
-		if !hasCommandOption(output, option) {
-			return fmt.Errorf("%s does not support %s", name, option)
+		if fs.Type != btrfsSuperMagic {
+			return fmt.Errorf("%s is not on a btrfs filesystem (fstype=%d); the runner image must be a btrfs subvolume (see deploy/setup.sh)", path, fs.Type)
+		}
+		if out, err := exec.Command("btrfs", "subvolume", "show", path).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s is not a btrfs subvolume: %s", path, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
-}
-
-func hasCommandOption(help []byte, option string) bool {
-	return slices.Contains(strings.Fields(string(help)), option)
 }
 
 func configPath() string {
@@ -281,21 +308,21 @@ func configPath() string {
 	return "/etc/actions-runner-processor/config.yaml"
 }
 
-func cleanupRunnerWorkspaces(root string) (int, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return 0, fmt.Errorf("read workspace root: %w", err)
-	}
+// usage prints the command-line help.
+func usage() {
+	fmt.Fprint(os.Stderr, `actions-runner-processor — a lightweight self-hosted GitHub Actions runner processor
 
-	removed := 0
-	for _, entry := range entries {
-		if !entry.IsDir() || !runnerWorkspacePattern.MatchString(entry.Name()) {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
-			return removed, fmt.Errorf("remove workspace %s: %w", entry.Name(), err)
-		}
-		removed++
-	}
-	return removed, nil
+Usage:
+  actions-runner-processor                     run the processor daemon
+  actions-runner-processor image install-full  download + expand the full runner image
+    --url <tarball-url>                        URL of the full image tar.gz
+    --from-actions [--owner <o>] [--repo <r>]  pull the latest build-image-full artifact
+                                               (GitHub App auth from config; defaults to
+                                               whywaita/actions-runner-processor; optional
+                                               --artifact-prefix <p>)
+    --image-path <path>                        image subvolume (default: config image_path or /opt/runner-btrfs/image)
+  actions-runner-processor help                show this help
+
+The runner image must be a btrfs subvolume (btrfs is enforced). See deploy/setup.sh.
+`)
 }

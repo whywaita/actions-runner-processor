@@ -4,20 +4,21 @@
 
 ## 1. Overview
 
-**actions-runner-processor** は、GitHub Actions のセルフホストランナーを Kubernetes なしで運用するための軽量 Go バイナリです。
+**actions-runner-processor** is a lightweight Go binary to run GitHub Actions self-hosted runners without Kubernetes.
 
-単一の Linux VM 上で動作し、[actions/scaleset](https://github.com/actions/scaleset)（GitHub 公式 SDK）の Message Session API を使ってジョブを検知し、[bubblewrap](https://github.com/containers/bubblewrap) で隔離された ephemeral runner を動的に起動・破棄します。
+It runs on a single Linux VM, detects jobs using the [actions/scaleset](https://github.com/actions/scaleset) (official GitHub SDK) Message Session API, and dynamically starts/destroys ephemeral runners isolated by [systemd-nspawn](https://systemd.io/). Each runner is booted from a custom image (a root filesystem), is writable during the job (`sudo` available), and is discarded on exit.
 
 ### Design Principles
 
-| 原則 | 説明 |
+| Principle | Description |
 |------|------|
-| **Single Binary** | Go 製シングルバイナリ。VM に scp して systemd unit を書くだけ |
-| **No Inbound** | 通信はすべて outbound。NAT/FW 内側から 443 だけ開いていれば動く |
-| **Ephemeral** | runner は 1 ジョブ実行後、自動的に登録解除 + sandbox ごと消滅 |
-| **JIT Runner** | Registration Token 不要。JIT Config で runner を直接起動 |
-| **Sandboxed** | bubblewrap による namespace 隔離。ジョブ間の干渉なし |
-| **ARC-Compatible** | Message Session は ARC と同一プロトコル。GitHub 公式 SDK を利用 |
+| **Single Binary** | Go single binary. `scp` it to a VM and write a systemd unit — done. |
+| **No Inbound** | All communication is outbound. Only port 443 open behind NAT/FW. |
+| **Ephemeral** | After one job, the runner auto-deregisters and its sandbox disappears. |
+| **JIT Runner** | No registration token. Boot the runner directly from a JIT Config. |
+| **Sandboxed** | Isolated per job in a systemd-nspawn container. Zero cross-job interference. |
+| **Custom Image** | Boot the runner from a custom rootfs image. `sudo` works inside the job. |
+| **ARC-Compatible** | Message Session uses the same protocol as ARC. Official GitHub SDK. |
 
 ## 2. Architecture
 
@@ -40,7 +41,7 @@
 │  │  │ Listener A    │  │ Listener B    │  ... (×N)     │  │
 │  │  │ (goroutine)   │  │ (goroutine)   │               │  │
 │  │  │               │  │               │               │  │
-│  │  │ scaleset. Client BwrapScaler     │  │ scaleset. Client BwrapScaler    │
+│  │  │ scaleset. Client Scaler        │  │ scaleset. Client Scaler         │
 │  │  └──────┬───────┘  └──────┬────────┘               │  │
 │  │         │                 │                          │  │
 │  │  ┌──────┴─────────────────┴──────────┐              │  │
@@ -50,8 +51,8 @@
 │  └──────────────────────────┬─────────────────────────┘  │
 │                              │                             │
 │              ┌───────────────┴───────────────┐            │
-│              │ bubblewrap sandboxes (×N×M)   │            │
-│              │  namespace 隔離、1job→消滅     │            │
+│              │ systemd-nspawn containers (×N×M) │            │
+│              │  ephemeral overlay, 1job→gone   │            │
 │              └───────────────────────────────┘            │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -61,49 +62,50 @@
 ```
 1. [GitHub]  workflow triggered → job queued
        │
-2. [Message Session]  job_available メッセージが Long-Poll 接続上で push
-       │                 （メッセージがない場合は HTTP 202 → すぐに再ポーリング）
+2. [Message Session]  job_available pushed over the Long-Poll connection
+       │                 (if no message: HTTP 202 → re-poll immediately)
        │
-3. [Listener]  AcquireJobs() でジョブを獲得
+3. [Listener]  AcquireJobs() to acquire a job
        │
-4. [Listener]  job_started メッセージ受信
+4. [Listener]  job_started message received
        │
 5. [Scaler]    HandleDesiredRunnerCount(count=TotalAssignedJobs)
        │          → target = min(maxRunners, minRunners + count)
-       │          → 不足分の runner を startRunner() で起動
+       │          → start the missing runners via startRunner()
        │
 6. [Scaler]    startRunner() → GenerateJitRunnerConfig(name)
-       │          → bwrap で runner 起動（JIT Config + temporary overlay）
+       │          → start the runner with systemd-nspawn (JIT Config + ephemeral overlay)
        │
-7. [Runner]    JIT Config で GitHub に自身を登録 → WebSocket でジョブ受信 → 実行
+7. [Runner]    registers itself with GitHub via the JIT Config → receives job over WebSocket → runs it
        │
-8. [Runner]    ジョブ完了 → 自動登録解除 → プロセス終了 → sandbox 消滅
+8. [Runner]    job completes → auto-deregister → process exits → sandbox gone
        │
-9. [Listener]  job_completed メッセージ受信（RunnerName を含む）
+9. [Listener]  job_completed message received (includes RunnerName)
        │
-10. [Scaler]   HandleJobCompleted() → RunnerName で runner を特定 → workspace と runner 登録をクリーンアップ
+10. [Scaler]   HandleJobCompleted() → locate the runner by RunnerName → clean up registration
 ```
 
 ### Tech Stack
 
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
-| Language | Go 1.23+ | シングルバイナリ、静的リンク、低リソース |
-| Message Session | `github.com/actions/scaleset` | GitHub 公式 SDK。ARC と同一プロトコル |
-| Listener Loop | `github.com/actions/scaleset/listener` | メッセージループ、ack、再試行を内包 |
-| Auth | GitHub App (installation token) | 既存ポリシー。PAT より安全、スコープ限定可 |
-| Sandbox | bubblewrap (`bwrap`) | rootless、依存極小（1 バイナリ）、namespace 隔離 |
-| Writable system | bubblewrap `--tmp-overlay` | ジョブごとの一時 CoW layer。外部 mount プロセス不要 |
-| Runner | `actions/runner` (GitHub 公式) | `--once --ephemeral` 不要。JIT Config モードで起動 |
-| Process Manager | systemd | VM 再起動時の自動起動、ログ管理 |
+| Language | Go 1.23+ | Single binary, static link, low resource usage |
+| Message Session | `github.com/actions/scaleset` | Official GitHub SDK. Same protocol as ARC |
+| Listener Loop | `github.com/actions/scaleset/listener` | Message loop, ack, and retry built in |
+| Auth | GitHub App (installation token) | Existing policy. Safer than PAT, scope-limited |
+| Sandbox | systemd-nspawn | Isolated container from a custom rootfs image. Ephemeral CoW root |
+| Custom Image | directory rootfs (`/opt/runner-btrfs/image`) | Lightweight (debootstrap) or full (systemd-nspawn + runner-images scripts) built by `image/build-*.sh`, baked in CI. Writable during job (sudo) |
+| Ephemeral Root | `--ephemeral` | Image (a btrfs subvolume) is CoW-snapshotted onto real disk; the writable snapshot is discarded on exit |
+| Runner | `actions/runner` (official) | No `--once --ephemeral` needed. Boot from JIT Config mode |
+| Process Manager | systemd | Auto-start on reboot, log management |
 | Metrics | `prometheus/client_golang` | Prometheus exporter |
-| Web UI | `embed` + `net/http` | 静的ファイル埋め込み、ゼロ依存 |
+| Web UI | `embed` + `net/http` | Static files embedded, zero dependencies |
 
 ## 3. Components
 
 ### 3.1 scaleset.Client Wrapper
 
-`internal/client/` — scaleset.Client のラッパー。
+`internal/client/` — a wrapper around `scaleset.Client`.
 
 ```go
 type Client struct {
@@ -122,61 +124,80 @@ func (c *Client) CreateOrGetScaleSet(ctx context.Context, name string) (*scalese
 func (c *Client) CreateMessageSession(ctx context.Context, owner string) (*scaleset.MessageSessionClient, error)
 ```
 
-**責務**: GitHub App 認証、Installation 自動検出、Scale Set の作成/取得、Message Session の確立。
+**Responsibilities**: GitHub App auth, installation auto-discovery, scale set create/get, message session establishment.
 
-### 3.2 BwrapScaler
+### 3.2 Scaler
 
-`internal/scaler/` — `listener.Scaler` インターフェースの実装。
+`internal/scaler/` — implements the `listener.Scaler` interface.
 
 ```go
-type BwrapScaler struct {
+type Scaler struct {
     client     *scaleset.Client
     scaleSetID int
     maxRunners int
-    minRunners int    // 常に維持する idle runner 数（デフォルト 0）
+    minRunners int    // idle runners to always keep (default 0)
     mu         sync.Mutex
     runners    map[string]*runner.Runner  // RunnerName → Runner
 }
 
-func (s *BwrapScaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error
-func (s *BwrapScaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error
-func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error)
-func (s *BwrapScaler) Shutdown(ctx context.Context)  // graceful shutdown: 全 runner を kill
+func (s *Scaler) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error
+func (s *Scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error
+func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error)
+func (s *Scaler) Shutdown(ctx context.Context)  // graceful drain + force-kill on timeout
 ```
 
-**責務**: runner のライフサイクル管理（起動、追跡、クリーンアップ）。
+**Responsibilities**: runner lifecycle management (launch, track, cleanup).
 
-**`HandleDesiredRunnerCount` のセマンティクス**:
+**`HandleDesiredRunnerCount` semantics**:
 
-`count` は `RunnerScaleSetStatistic.TotalAssignedJobs`（現在割り当て済みのジョブ総数）。
-Scaler は `minRunners + count` を目標に runner を増減させる（`maxRunners` が上限）。
+`count` is `RunnerScaleSetStatistic.TotalAssignedJobs` (the total number of currently assigned jobs). The scaler scales runners toward `minRunners + count` (`maxRunners` is the upper bound).
 
 ```go
-func (s *BwrapScaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
     current := len(s.runners)
     target := min(s.maxRunners, s.minRunners + count)
 
     if target > current {
         for i := 0; i < target - current; i++ {
-            s.startRunner(ctx)  // JIT Config 生成 + bwrap 起動
+            s.startRunner(ctx)  // JIT Config + nspawn launch
         }
     }
     return len(s.runners), nil
 }
 ```
 
-Runner の追跡には `RunnerName`（JIT Config 発行時に指定した名前）を使用。
-`HandleJobCompleted` が呼ばれたら、該当 Runner のプロセスをクリーンアップする。
+Runners are tracked by `RunnerName` (the name specified when issuing the JIT Config). When `HandleJobCompleted` is called, the corresponding Runner process is cleaned up.
+
+### Graceful shutdown
+
+On `SIGTERM`/`SIGINT` the listener stops acquiring new jobs, then each `Scaler.Shutdown` runs a drain window (`runner.shutdown_grace_timeout`, default `10m`) so in-flight jobs can finish before the process exits. Without this drain the process would exit immediately and systemd would SIGKILL the whole cgroup — including any nspawn containers still running a job — losing the job (observed as GitHub's "lost communication" + `Container ... terminated by signal KILL`).
+
+```go
+func (s *Scaler) Shutdown(ctx context.Context)
+    // 1. Kick idle runners (not executing a job) so they drain promptly.
+    // 2. Wait for the tracked set to drain to zero (each runner's monitor
+    //    goroutine removes it on exit).
+    // 3. On ctx timeout, force-kill the remainder.
+```
+
+Drain semantics:
+
+- A runner is considered mid-job when it is **tracked-busy** (the scaler marks it via `SetBusy` on `HandleJobStarted`) **or** `RunningJob()` is true (`Running job:` in captured output). The union covers both the brief window before the output line is flushed (when a just-assigned runner has not yet printed `Running job:`) and rare runner-name mismatches. A busy runner is left alone and the monitor goroutine removes it once the job finishes.
+- An idle runner (not assigned / booted) is killed immediately; nothing is at stake.
+- The runner is detached from the signal context: `Launch` binds the `systemd-nspawn` child via `exec.CommandContext(context.WithoutCancel(ctx), ...)` so the transition into shutdown does not SIGKILL live containers. The drain is the only place runners are terminated.
+
+The packaged systemd unit sets `TimeoutStopSec=660` (i.e. > default `10m` grace + margin) **and `KillMode=process`**. If `runner.shutdown_grace_timeout` is raised, `TimeoutStopSec` must be raised to match, otherwise systemd SIGKILLs the cgroup before the drain completes. `KillMode=process` is essential: with the default `control-group`, systemd sends SIGTERM/SIGKILL to the entire cgroup — including every nspawn child — on restart/stop, SIGKILLing runner containers mid-job before the processor's drain logic ever runs (observed as "Container ... terminated by signal KILL" + GitHub "lost communication"). With `KillMode=process` systemd signals only the processor main process; the processor owns and reaps its nspawn children.
 
 ### 3.3 Runner Launcher
 
-`internal/runner/` — bubblewrap 経由での runner 起動。
+`internal/runner/` — starts the runner via systemd-nspawn.
 
 ```go
 type Runner struct {
     Name       string
     JITConfig  string
-    WorkDir    string
+    ImagePath  string
+    Entrypoint string
 }
 
 func Launch(ctx context.Context, r Runner) error
@@ -184,51 +205,90 @@ func (r *Runner) Wait() error
 func (r *Runner) Kill() error
 ```
 
-**bubblewrap 実行コマンド**:
+**systemd-nspawn launch command**:
 
-ジョブごとに bubblewrap の `--tmp-overlay` でシステムディレクトリと runner バイナリの writable layer を作成する。
+`ImagePath` (a custom rootfs directory) is booted via `--ephemeral`: systemd-nspawn CoW-snapshots the directory onto real disk, the container runs against the writable snapshot, and the snapshot is discarded when the container exits. A job can freely rewrite `/usr` with e.g. `sudo apt install` without affecting other jobs or the host.
+
+> **Why btrfs (enforced)**: systemd-nspawn's `--ephemeral` makes a cheap CoW snapshot only when the image directory is a **btrfs subvolume**; the processor enforces this at startup (fails if the image isn't on a btrfs subvolume), and `deploy/setup.sh` provisions a loopback btrfs at `/opt/runner-btrfs` automatically. On ext4 (or a plain btrfs directory) `--ephemeral` would fall back to a full recursive copy of the image per job, which is why non-btrfs is rejected. Since the image root lands on real disk (not a RAM tmpfs), job writes (toolchain caches, the runner home, `sudo apt install` into `/usr`) can never exhaust a small overlay with `ENOSPC`. `--ephemeral` writes `machine.<rand>` snapshot dirs next to it in the btrfs and discards them automatically on exit. No host bind is used today — the job workspace (`/opt/actions-runner/_work`) lives inside the discarded snapshot too, so there is no host-side workspace dir to bind or clean up.
 
 ```bash
-JOB_ID="runner-$(uuidgen | cut -c1-8)"
-mkdir -p "/opt/runner/workspaces/${JOB_ID}"
+# Boot a runner per job in an nspawn container
+R_NAME="runner-$(uuidgen | cut -c1-8)"
+systemd-nspawn \
+  --directory=/opt/runner-btrfs/image \                    # custom image (a btrfs subvolume)
+  --ephemeral \                                        # CoW-snapshot root; discarded on exit
+  --boot \                                             # systemd as PID1: systemctl/dockerd work
+--network-zone=rn-<runner-id> \             # per-runner private bridge (isolated from host and other jobs)
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \            # dockerd: storage + netfilter (private netns)
+  --bind-ro=/run/actions-runner-processor/${R_NAME}.jitconfig:/opt/actions-runner/.jitconfig \
+  --machine="${R_NAME}" \
+  --bind-ro=/dev/null /etc/actions-runner-processor/config.yaml \
+  --bind-ro=/dev/null /etc/actions-runner-processor/github-app.pem
 
-bwrap \
-  --overlay-src /usr --tmp-overlay /usr \
-  --overlay-src /lib --tmp-overlay /lib \
-  --overlay-src /lib64 --tmp-overlay /lib64 \
-  --overlay-src /bin --tmp-overlay /bin \
-  --overlay-src /sbin --tmp-overlay /sbin \
-  --overlay-src /etc --tmp-overlay /etc \
-  --overlay-src /var --tmp-overlay /var \
-  --overlay-src /opt/runner/actions-runner --tmp-overlay /actions-runner \
-  --tmpfs /run \
-  --dir /run/systemd \
-  --dir /run/systemd/resolve \
-  --ro-bind /etc/resolv.conf /etc/resolv.conf \
-  --ro-bind /etc/hosts /etc/hosts \
-  --ro-bind /dev/null /etc/actions-runner-processor/config.yaml \
-  --ro-bind /dev/null /etc/actions-runner-processor/github-app.pem \
-  --dev /dev \
-  --proc /proc \
-  --tmpfs /home/runner \
-  --tmpfs /tmp \
-  --bind /opt/runner/workspaces/${JOB_ID} /actions-runner/_work \
-  --unshare-all \
-  --share-net \
-  --uid 0 --gid 0 \
-  --die-with-parent \
-  --new-session \
-  /actions-runner/run.sh
-
-# ジョブ完了後に workspace を削除
-rm -rf "/opt/runner/workspaces/${JOB_ID}"
+# The baked actions-runner.service (systemd oneshot) runs entrypoint.sh, which
+# pulls ACTIONS_RUNNER_INPUT_JITCONFIG from the protected .jitconfig file, then
+# runs the official /opt/actions-runner/run.sh. When the job ends the runner
+# exits, the unit powers off, and --ephemeral discards the snapshot.
 ```
 
-- システムディレクトリと runner バイナリを **両方 temporary overlay** 化。変更はプロセス終了時に破棄される
-- クリーンアップは Scaler の `HandleJobCompleted` 内で実行
-- 設定ファイルと GitHub App の秘密鍵は `/dev/null` を bind して sandbox から隠す
-- runner プロセス終了時は JIT 応答の runner ID を使って GitHub 側の登録も削除する
-- processor 起動時は `runner-xxxxxxxx` 形式の stale workspace を削除する
+- Custom image lives at `runner.image_path` (a btrfs subvolume, e.g. `/opt/runner-btrfs/image`). Built by `image/build-image.sh` (lightweight) or `image/build-image-full.sh` (full).
+- Networking: `--network-zone=rn-<runner-id>` gives each runner a private network namespace on its OWN nspawn-managed bridge (per-runner zone, so concurrent jobs can't reach each other over L2); the host NATs outbound HTTPS out (see `deploy/deploy.sh`).
+- resolv.conf is baked into the image with real resolvers (the old `--bind-ro=/etc/resolv.conf` would point at 127.0.0.53 = the container's own loopback in a private netns).
+- The runner boots as the `runner` user inside the container (passwordless sudo) → `sudo` works in job steps. systemd-nspawn itself runs as host root.
+- The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.
+- When a runner process exits, its GitHub registration is removed using the runner ID from the JIT response.
+
+### 3.3.2 Custom runner image generation
+
+`image/` ships declarative builders for the nspawn rootfs. There are two:
+
+```
+image/
+├── image.yaml           # manifest for the lightweight image
+├── build-image.sh       # lightweight: debootstrap + chroot + tar.gz
+├── image-full.yaml      # manifest for the full image
+├── build-image-full.sh  # full: debootstrap + nspawn + runner-images scripts
+└── (built by) .github/workflows/build-image.yaml      # lightweight
+    and .github/workflows/build-image-full.yaml        # full (dispatch-only)
+```
+
+**Lightweight (option B, default)** — `image/build-image.sh` debootstraps the
+base, applies the apt packages from `image/image.yaml` and installs
+`actions/runner` at `/opt/actions-runner` inside a chroot, then packs the
+rootfs into `actions-runner-image-<arch>.tar.gz`. Fast (minutes), runs on
+PRs/pushes and `workflow_dispatch` via `.github/workflows/build-image.yaml`.
+
+**What the lightweight image contains:**
+
+- A minimal Debian/Ubuntu base (`debootstrap --variant=minbase`), booted with
+  **systemd as PID 1** (`--boot`) so `systemctl` works inside job steps.
+- The `actions/runner` binary at `/opt/actions-runner`, booted by the baked
+  `actions-runner.service` (via `/opt/actions-runner/entrypoint.sh`) that reads
+  the JIT config and runs the official `run.sh`.
+- The extra apt packages declared in `image/image.yaml` (build tools, runtime
+  deps), baked in so jobs don't install them per run.
+- A dedicated `runner` user (uid 1001, home `/home/runner`, passwordless sudo)
+  mirroring the GitHub-hosted layout. The baked unit runs the entrypoint as
+  this user, so the runner process and job steps run as `runner` and `sudo`
+  works inside jobs. `/opt/actions-runner` and `/home/runner` are owned by
+  `runner`.
+
+**Full (option A)** — `image/build-image-full.sh` produces a
+GitHub-hosted-compatible toolset. `actions/runner-images` is built by running
+`images/ubuntu/scripts/build/*.sh` in order (its Packer templates are just a
+loop over these shell scripts), so this script debootstraps a base, boots it
+in a `systemd-nspawn` container (`--boot`), and runs the same build scripts
+directly inside with the repo bind-mounted. **No LXD or Packer is needed.**
+Heavy (~1h, 50GB+), gated on `workflow_dispatch` via the
+`.github/workflows/build-image-full.yaml` workflow (separate from the
+lightweight build so the PR view stays clean).
+
+The tarball is expanded to `runner.image_path` (default `/opt/runner-btrfs/image`):
+
+```bash
+sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner-btrfs/image     # B
+sudo tar -xzf actions-runner-image-full-amd64.tar.gz -C /opt/runner-btrfs/image # A
+```
 
 ### 3.4 main entrypoint
 
@@ -239,13 +299,13 @@ func main() {
     cfg := config.Load()
     auth := cfg.GitHub
 
-    // ① API から全 Installation を自動検出
+    // ① Auto-discover all installations via the API
     installations, err := client.DiscoverInstallations(ctx, auth.ClientID, auth.PrivateKey)
     if err != nil {
         log.Fatal(err)
     }
 
-    // ② 全 listener の集約ビュー
+    // ② Aggregate view across all listeners
     registry := metrics.NewRegistry()
     var wg sync.WaitGroup
 
@@ -269,6 +329,9 @@ func main() {
                 cfg.Runner.ActionsRunnerPath,
                 cfg.Runner.WorkspaceRoot,
                 []string{configPath(), cfg.GitHub.PrivateKeyPath},
+                cfg.Runner.Mode,
+                cfg.Runner.ImagePath,
+                cfg.Runner.Entrypoint,
             )
             defer scaler.Shutdown(context.Background())
 
@@ -295,23 +358,23 @@ func main() {
 
 ### 3.4.1 Multi-Listener Architecture
 
-1 プロセスで N 個の listener（goroutine）を並行稼働させる設計上のポイント：
+Design points for running N listeners (goroutines) concurrently in one process:
 
-| 項目 | 設計 |
+| Item | Design |
 |------|------|
-| **スケジューリング** | 各 listener は独立した goroutine。Go ランタイムが M:N スケジュール |
-| **障害分離** | 1 つの listener がエラーで死んでも他は継続。`errgroup` で集約エラーハンドリング |
-| **リソース共有** | `max_runners` の合計が CPU コア数を超える可能性があるが、runner は ephemeral でジョブ時のみ起動するため問題ない（オーバーコミット可） |
-| **メトリクス** | 全 Scaler を 1 つの Registry に登録し、Prometheus endpoint で集約表示 |
-| **Web UI** | 全 Scale Set の状態を 1 画面にタブ/カードで表示 |
+| **Scheduling** | Each listener is an independent goroutine. The Go runtime schedules them M:N |
+| **Fault isolation** | If one listener dies from an error, the others continue. Aggregated error handling via `errgroup` |
+| **Resource sharing** | The sum of `max_runners` can exceed the CPU core count, but runners are ephemeral and only start during jobs, so this is fine (overcommit is OK) |
+| **Metrics** | Register all Scalers in one Registry, aggregate via the Prometheus endpoint |
+| **Web UI** | Show all Scale Sets in a single view as tabs/cards |
 
 ### 3.5 Metrics Exporter
 
-`internal/metrics/` — Prometheus metrics exporter。
+`internal/metrics/` — Prometheus metrics exporter.
 
 ```go
 type Exporter struct {
-    scaler *scaler.BwrapScaler
+    scaler *scaler.Scaler
 }
 
 // Exposed metrics:
@@ -321,29 +384,29 @@ type Exporter struct {
 //   runner_listener_job_duration_seconds (histogram)
 ```
 
-**責務**: Prometheus `/metrics` エンドポイントの提供。runner 状態、ジョブ実行数、所要時間を公開。
+**Responsibilities**: Provide the Prometheus `/metrics` endpoint. Expose runner state, job execution count, and duration.
 
 ### 3.6 Web UI
 
-`internal/webui/` — 簡易ダッシュボード。Go の `embed` で静的ファイルをバイナリに埋め込み。
+`internal/webui/` — a simple dashboard. Static files embedded in the binary via Go `embed`.
 
 ```
-/               → ダッシュボード（active runners, job queue, recent jobs）
-/api/status     → JSON API（scaler 状態）
-/api/jobs       → JSON API（ジョブ履歴）
+/               → dashboard (active runners, job queue, recent jobs)
+/api/status     → JSON API (scaler state)
+/api/jobs       → JSON API (job history)
 ```
 
-**責務**: 現在の runner 状態とジョブ履歴の可視化。1 画面の簡易ダッシュボード。
+**Responsibilities**: Visualize current runner state and job history. A simple one-screen dashboard.
 
 ## 4. Configuration
 
 ### Scope Auto-Detection
 
-`config_url` は GitHub App の Installation API (`GET /app/installations`) から全 Installation を自動取得し、それぞれの scope を解決する。
+`config_url` auto-fetches all installations from the GitHub App Installation API (`GET /app/installations`) and resolves each one's scope.
 
 ```go
 func discoverInstallations(ctx context.Context, clientID, privateKey string) ([]Installation, error) {
-    // JWT で GET /app/installations → 全 Installation を列挙
+    // GET /app/installations with JWT → enumerate all installations
     installations, _ := gh.Apps.ListInstallations(ctx)
 
     var result []Installation
@@ -363,15 +426,15 @@ func discoverInstallations(ctx context.Context, clientID, privateKey string) ([]
 ```yaml
 # /opt/runner-listener/config.yaml
 github:
-  client_id: "123456"               # GitHub App の App ID（JWT iss として使用）
+  client_id: "123456"               # GitHub App App ID (used as JWT iss)
   private_key_path: "/etc/runner-listener/github-app.pem"
 
-scale_set_name: "runner-listener"  # 全 Installation で共通の Scale Set 名
+scale_set_name: "runner-listener"  # Scale Set name shared across all installations
 
 runner:
-  version: "latest"                # actions/runner のバージョン。"latest" で自動解決
-  actions_runner_path: "/opt/runner/actions-runner"
-  workspace_root: "/opt/runner/workspaces"  # tmpfs per job, no persistence
+  image_path: "/opt/runner-btrfs/image"  # custom runner image (btrfs subvolume rootfs)
+  shutdown_grace_timeout: "10m"          # drain in-flight jobs on SIGTERM
+  version: "latest"                # actions/runner version (informational)
 
 metrics:
   enabled: true
@@ -385,8 +448,8 @@ webui:
 ### max_runners / min_runners
 
 ```go
-// cfg.MaxRunners = 0 → 各 Installation が runtime.NumCPU() を使う
-// cfg.MinRunners = 0 → warm idle runner なし
+// cfg.MaxRunners = 0 → each Installation uses runtime.NumCPU()
+// cfg.MinRunners = 0 → no warm idle runners
 func (cfg Config) ResolveMaxRunners() int {
     if cfg.MaxRunners == 0 {
         return runtime.NumCPU()
@@ -395,14 +458,14 @@ func (cfg Config) ResolveMaxRunners() int {
 }
 ```
 
-全 Installation で同じ `maxRunners` / `minRunners` が適用される。runner はジョブ実行時のみプロセスが存在するため、N 個の Installation で N×NumCPU が起動しても実際の負荷はジョブ数次第。
+The same `maxRunners` / `minRunners` apply across all Installations. Runners only exist as processes during job execution, so even if N Installations start N×NumCPU, the real load depends on the job count.
 
 ### Required Permissions (GitHub App)
 
 | Permission | Reason |
 |-----------|--------|
-| `administration:read` | Installation 情報の取得、Runner Group / Scale Set の管理 |
-| `organization_self_hosted_runners:write` | Runner 登録トークン発行 |
+| `administration:read` | Fetch installation info, manage Runner Groups / Scale Sets |
+| `organization_self_hosted_runners:write` | Issue runner registration tokens |
 
 ## 5. Security Design
 
@@ -410,102 +473,105 @@ func (cfg Config) ResolveMaxRunners() int {
 
 | Threat | Countermeasure |
 |--------|---------------|
-| ジョブ間の横断アクセス | bubblewrap `--unshare-all` (PID, IPC, UTS, mount namespace 分離) |
-| ジョブがホストファイルを改ざん | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`, `/var` は bubblewrap temporary overlay。変更はジョブ終了時に破棄 |
-| runner プロセスが残存 | `--die-with-parent` (listener が死んだら全 sandbox も死ぬ) |
-| 認証情報漏洩 | GitHub App private key は権限 600 かつ sandbox 内で mask。JIT Config はワンタイム |
-| ネットワーク経由の攻撃 | `--share-net` のみ（GitHub との通信に必要）。他の network namespace は隔離 |
-| ジョブのリソース食い潰し | `--new-session` + プロセスグループに cgroup 制限を適用可能（将来） |
+| Cross-job access | systemd-nspawn container (PID, IPC, UTS, mount namespace isolation). The runner is the `runner` user inside the container (passwordless sudo), in a separate namespace from the host |
+| Job mutating host files | Custom image is CoW-snapshotted via `--ephemeral`; the writable snapshot is discarded on job exit |
+| Runner process lingering | systemd-nspawn container terminated via `Kill()`. The ephemeral overlay is discarded at the same time |
+| Credential leak | GitHub App private key chmod 600 and masked inside the sandbox. JIT Config is one-time use |
+| Network-based attack | Host network shared (outbound only). Only the necessary connections are possible |
+| Job exhausting resources | `--new-session` + cgroup limits on the process group (future) |
 
 ### JIT Config Security
 
-- JIT Config は **ワンタイム**。発行後 1 回のみ使用可能
-- runner がジョブを完了すると自動で無効化
-- 仮に漏洩しても、使用済みまたは期限切れのため再利用不可
+- JIT Config is **one-time use**. Can be used only once after issuance.
+- Automatically invalidated after the runner completes its job.
+- Even if leaked, it cannot be reused because it is used-up or expired.
 
 ## 6. Design Decisions & Edge Cases
 
 ### Message Queue Semantics
 
-- `GetMessage()` はメッセージがない場合 **HTTP 202 → `(nil, nil)`** を返す
-- `listener.Listener` はこれを受けて即座に再ポーリングする（ビジーループにはならない）
-- `DeleteMessage()` はメッセージの **ack**。呼ばないと同じメッセージが再送される
-- Message Session のアクセストークンは期限切れがあり、SDK が自動リフレッシュ
+- `GetMessage()` returns **HTTP 202 → `(nil, nil)`** when there are no messages.
+- `listener.Listener` re-polls immediately in that case (no busy loop).
+- `DeleteMessage()` is the message **ack**. If not called, the same message is redelivered.
+- Message Session access tokens expire and the SDK auto-refreshes them.
 
 ### Session Lifecycle
 
-- `MessageSessionClient` は作成時に `POST .../sessions` でセッションを確立
-- **必ず `Close()` を呼ぶこと**（`DELETE .../sessions/{id}` でセッション削除）
-- プロセス終了時は `defer session.Close(context.Background())` で確実に後始末
+- `MessageSessionClient` establishes a session via `POST .../sessions` on creation.
+- **Must call `Close()`** (`DELETE .../sessions/{id}` removes the session).
+- Ensure cleanup with `defer session.Close(context.Background())` on process exit.
 
 ### Scale Set Lifecycle
 
-- Scale Set は起動時に作成（または既存を取得）、終了時に削除
-- 削除しないと孤儿 Scale Set が残り、GitHub 側のジョブ割当に影響
-- 1VM 1ScaleSet 運用のため、終了時削除が安全
+- Scale Set is created at startup (or an existing one is reused) and deleted on exit.
+- Leaving it undeleted orphans the Scale Set and affects job assignment on GitHub's side.
+- Because this is a 1VM-1ScaleSet operation, deleting on exit is safe.
 
 ### Runner Naming & Tracking
 
-- JIT Config 発行時の `Name` と `JobStarted.JobCompleted.RunnerName` が一致する
-- この `RunnerName` をキーに runner プロセスを追跡する
-- `HandleJobCompleted` で該当 runner のプロセスツリーを `Kill()` + sandbox 削除
+- The `Name` at JIT Config issuance matches `JobStarted.JobCompleted.RunnerName`.
+- Track the runner process by this `RunnerName` as the key.
+- In `HandleJobCompleted`, `Kill()` the corresponding runner's process tree and remove the sandbox.
 
-### Stuck Runner 対策
+### Stuck Runner Handling
 
-- Runner がジョブを掴んだまま応答しなくなった場合のタイムアウトが必要
-- 将来的に `context.WithTimeout` で runner プロセス全体を kill する機構を追加
-- v1 では GitHub Actions のデフォルトジョブタイムアウト（6h）に任せる
+- A timeout is needed for runners that grab a job but stop responding.
+- A mechanism to kill the whole runner process via `context.WithTimeout` will be added later.
+- v1 relies on GitHub Actions' default job timeout (6h).
 
-### Runner バイナリの更新
+### Runner Binary Updates
 
-- `DisableUpdate: true` を Scale Set 設定で指定（自動更新を無効化）
-- 更新は VM イメージの再ビルド + systemd 再起動で行う
-- `actions/runner` 自体の更新は `runner-listener` のデプロイフローに組み込む
+- Set `DisableUpdate: true` in Scale Set settings to disable auto-update.
+- Updates are done by rebuilding the VM image + systemd restart.
+- Updating `actions/runner` itself is folded into the deployment flow of the runner.
 
 ## 7. Deployment
 
 ### VM Setup (one-time)
 
 ```bash
-# 1. 依存パッケージ
-apt install bubblewrap
+# 1. Dependencies
+apt install systemd-container
 
-# 2. actions/runner の展開（起動時に runner-listener が自動で行う）
-#    version: "latest" → GitHub API で最新バージョンを解決 → ダウンロード
-#    手動で事前展開する場合は:
-#   RUNNER_VERSION="v2.326.0"
-#   curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION#v}.tar.gz" | tar xz -C /opt/runner/actions-runner
+# 2. Build the custom runner image (place at /opt/runner-btrfs/image)
+#    Use the repo's builders: image/build-image.sh (lightweight) or
+#    image/build-image-full.sh (full GitHub-hosted-compatible toolset).
+#    Manual lightweight equivalent:
+RUNNER_VERSION="v2.326.0"
+sudo debootstrap --variant=minbase noble /opt/runner/work-rootfs
+sudo mkdir -p /opt/runner/work-rootfs/opt/actions-runner
+curl -L "https://github.com/actions/runner/releases/download/${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION#v}.tar.gz" \
+  | sudo tar xz -C /opt/runner/work-rootfs/opt/actions-runner
+sudo rm -rf /opt/runner-btrfs/image
+sudo mv /opt/runner/work-rootfs /opt/runner-btrfs/image
 
-# 3. 専用ユーザー作成
-useradd -r -s /bin/false runner-listener
-mkdir -p /opt/runner/{actions-runner,workspaces}
-chown -R runner-listener:runner-listener /opt/runner
+# 3. systemd-nspawn must run as root on the host; the runner inside the image
+#    boots as the dedicated `runner` user
 
-# 4. runner-listener の配置
-cp runner-listener /opt/runner-listener/
-cp config.yaml /etc/runner-listener/
-cp github-app.pem /etc/runner-listener/ && chmod 600 /etc/runner-listener/github-app.pem
+# 4. Install the processor
+cp actions-runner-processor /opt/actions-runner-processor/
+cp config.yaml /etc/actions-runner-processor/
+cp github-app.pem /etc/actions-runner-processor/ && chmod 600 /etc/actions-runner-processor/github-app.pem
 
-# 5. systemd unit
-cat > /etc/systemd/system/runner-listener.service << 'EOF'
+# 5. systemd unit (runs as root)
+cat > /etc/systemd/system/actions-runner-processor.service << 'EOF'
 [Unit]
-Description=GitHub Actions Runner Listener
+Description=GitHub Actions Runner Processor
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=runner-listener
-ExecStart=/opt/runner-listener/runner-listener
+ExecStart=/usr/bin/actions-runner-processor
 Restart=always
 RestartSec=10
-Environment=CONFIG_PATH=/etc/runner-listener/config.yaml
+Environment=CONFIG_PATH=/etc/actions-runner-processor/config.yaml
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now runner-listener
+systemctl enable --now actions-runner-processor
 ```
 
 ### Workflow Targeting
@@ -514,17 +580,17 @@ systemctl enable --now runner-listener
 # .github/workflows/build.yml
 jobs:
   build:
-    runs-on: self-hosted  # Scale Set のラベルにマッチ
+    runs-on: self-hosted  # matches the Scale Set label
     steps:
       - uses: actions/checkout@v4
       - run: make build
 ```
 
-### Runner バージョン管理
+### Runner Version Management
 
-- デフォルト `"latest"` を指定すると、起動時に GitHub API から最新リリースを取得
-- 明示的なバージョン（`"v2.326.0"`）も指定可能
-- 解決は `actions/runner` の [GitHub Releases](https://github.com/actions/runner/releases) から行う
+- The default `"latest"` fetches the latest release from the GitHub API at startup.
+- An explicit version (e.g. `"v2.326.0"`) can also be specified.
+- Resolution uses `actions/runner` [GitHub Releases](https://github.com/actions/runner/releases).
 
 ```go
 func resolveRunnerVersion(cfgVersion string) (string, error) {
@@ -536,8 +602,8 @@ func resolveRunnerVersion(cfgVersion string) (string, error) {
 }
 ```
 
-- 起動時に解決したバージョンの tarball が未キャッシュならダウンロード
-- `DisableUpdate: true` により runner の自動更新は無効化（更新は runner-listener 再起動時）
+- If the tarball for the resolved version is not cached at startup, it is downloaded.
+- `DisableUpdate: true` disables runner auto-update (updates happen on runner restart).
 
 ## 8. Project Structure
 
@@ -545,27 +611,30 @@ func resolveRunnerVersion(cfgVersion string) (string, error) {
 actions-runner-processor/
 ├── cmd/
 │   └── runner-listener/
-│       └── main.go               # エントリーポイント
+│       └── main.go               # entrypoint
 ├── internal/
 │   ├── client/
-│   │   └── client.go             # scaleset.Client ラッパー、scope 自動検出
+│   │   └── client.go             # scaleset.Client wrapper, scope auto-detection
 │   ├── config/
-│   │   └── config.go             # 設定読み込み
+│   │   └── config.go             # config loading
 │   ├── metrics/
 │   │   └── metrics.go            # Prometheus exporter
 │   ├── runner/
-│   │   └── runner.go             # bwrap runner 起動
+│   │   └── runner.go             # systemd-nspawn runner launch
 │   ├── scaler/
-│   │   └── scaler.go             # listener.Scaler 実装
+│   │   └── scaler.go             # listener.Scaler implementation
 │   └── webui/
 │       ├── server.go             # HTTP handler
 │       └── templates/            # embed FS: dashboard HTML
+├── image/
+│   ├── image.yaml                # custom image manifest (base distro, arch, packages)
+│   └── build-image.sh            # debootstrap + chroot rootfs builder
 ├── go.mod
 ├── go.sum
-├── .goreleaser.yaml              # GoReleaser 設定
-├── .tagpr                        # tagpr 設定（自動バージョニング）
+├── .goreleaser.yaml              # GoReleaser config
+├── .tagpr                        # tagpr config (auto versioning)
 ├── DESIGN.md                     # this file
-├── SPEC.md                       # 実装詳細（別途）
+├── SPEC.md                       # implementation details (separate)
 └── README.md
 ```
 
@@ -573,14 +642,14 @@ actions-runner-processor/
 
 | Phase | Scope | Effort |
 |-------|-------|--------|
-| **Phase 1: Core** | `go mod init`, 設定読み込み, Installation scope 自動検出, scaleset.Client 初期化, Scale Set 作成 | 小 |
-| **Phase 2: Listener** | Message Session 確立, listener.Run(), 空の Scaler | 小 |
-| **Phase 3: Runner** | JIT Config 生成, bwrap runner 起動, プロセス管理 | 中 |
-| **Phase 4: Scaler** | HandleDesiredRunnerCount (スケールアップ/ダウン), HandleJobCompleted (クリーンアップ) | 中 |
-| **Phase 5: Metrics** | Prometheus exporter, runner/job メトリクス公開 | 小 |
-| **Phase 6: Web UI** | embed 簡易ダッシュボード, `/api/status`, `/api/jobs` JSON API | 中 |
-| **Phase 7: Ops** | systemd unit, ログ, ヘルスチェック, graceful shutdown | 小 |
-| **Phase 8: CI/CD** | GitHub Actions workflow, GoReleaser でクロスコンパイル + GitHub Release, tagpr で自動バージョニング | 中 |
+| **Phase 1: Core** | `go mod init`, config loading, installation scope auto-detection, scaleset.Client init, Scale Set creation | Small |
+| **Phase 2: Listener** | Message Session setup, listener.Run(), empty Scaler | Small |
+| **Phase 3: Runner** | JIT Config generation, systemd-nspawn runner launch, process management | Medium |
+| **Phase 4: Scaler** | HandleDesiredRunnerCount (scale up/down), HandleJobCompleted (cleanup) | Medium |
+| **Phase 5: Metrics** | Prometheus exporter, expose runner/job metrics | Small |
+| **Phase 6: Web UI** | embed simple dashboard, `/api/status`, `/api/jobs` JSON API | Medium |
+| **Phase 7: Ops** | systemd unit, logs, health check, graceful shutdown | Small |
+| **Phase 8: CI/CD** | GitHub Actions workflow, GoReleaser cross-compile + GitHub Release, tagpr auto versioning | Medium |
 
 ### CI/CD Pipeline
 
@@ -621,7 +690,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0      # 全履歴 + 全タグを取得（tagpr が打ったタグを GoReleaser が検出できるように）
+          fetch-depth: 0      # fetch full history + all tags (so GoReleaser detects the tagpr tag)
       - uses: goreleaser/goreleaser-action@v6
         with:
           args: release --clean
@@ -641,16 +710,16 @@ archives:
   - format: tar.gz
     name_template: "runner-listener_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
-# tagpr 設定（.tagpr ファイル or .github/tagpr.yaml）
-#   PR ラベルに応じて major/minor/patch を自動判定
+# tagpr config (.tagpr file or .github/tagpr.yaml)
+#   determines major/minor/patch automatically from PR labels
 ```
 
-- **tagpr**: main マージ時に PR ラベルを見てバージョンを自動決定・タグ付け
-- **GoReleaser**: タグが打たれたら静的リンクバイナリをビルドし GitHub Release を作成
-- 成果物: `runner-listener_linux_amd64.tar.gz`, `runner-listener_linux_arm64.tar.gz`
+- **tagpr**: on the main merge, looks at PR labels, auto-decides the version, and tags.
+- **GoReleaser**: when a tag is created, builds statically-linked binaries and creates a GitHub Release.
+- Artifacts: `runner-listener_linux_amd64.tar.gz`, `runner-listener_linux_arm64.tar.gz`.
 
 ## 10. Future Extensions (Out of Scope for v1)
 
-- 複数 VM へのスケールアウト（Message Session がもともとマルチ listener 対応なので、同じ Scale Set を別 VM でも listen するだけで実現）
-- cgroup によるリソース制限（CPU/メモリ）
-- runner イメージの自動更新
+- Scale-out across multiple VMs (Message Session is already multi-listener capable, so listening on the same Scale Set from another VM is enough).
+- Resource limits via cgroup (CPU/memory).
+- Automatic runner image updates.
