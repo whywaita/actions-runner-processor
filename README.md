@@ -345,10 +345,14 @@ golangci-lint run
 GitHub Actions workflows (`build` + `release`) are in `.github/workflows/`:
 
 - **build** — `go build`, `go test -race`, `go vet`, `golangci-lint` on PR
-- **release** — tagpr + GoReleaser on main push
+- **release** — tagpr + GoReleaser on main push or `v*` tag push
 
 GoReleaser produces `actions-runner-processor_<version>_linux_<arch>.tar.gz`
-artifacts for `amd64` and `arm64`.
+artifacts for `amd64` and `arm64`. Pushing a prerelease tag (e.g.
+`v0.0.5-rc2`) triggers the same release pipeline and GoReleaser marks it as a
+pre-release automatically, packaging a freshly-built lightweight runner image
+with it — useful for verifying a candidate on a real host before the final
+tagpr release.
 
 ## License
 
