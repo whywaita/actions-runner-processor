@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.0.5](https://github.com/whywaita/actions-runner-processor/compare/v0.0.4...v0.0.5) - 2026-08-26
+
+- feat: switch sandbox backend from bubblewrap to systemd-nspawn (custom image + sudo) by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/11
+- ci: trigger release pipeline on v* tag pushes for RC candidates by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/13
+- fix: run goreleaser on tag pushes despite skipped tagpr job by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/14
+- ci: ignore .release/ generated during the release build by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/15
+- ci: build the lightweight image outside the repo for tag releases by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/16
+
 ## [v0.0.4](https://github.com/whywaita/actions-runner-processor/compare/v0.0.3...v0.0.4) - 2026-08-11
 
 - fix: monitor runner process lifecycle and add JSON log support by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/9
