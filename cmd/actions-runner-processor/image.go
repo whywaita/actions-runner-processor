@@ -136,7 +136,7 @@ func installFullImage(url string, fromActions bool, owner, repo, artifactPrefix,
 		if err != nil {
 			return fmt.Errorf("open gzip stream: %w", err)
 		}
-		defer gr.Close()
+		defer func() { _ = gr.Close() }()
 		if err := clearDir(imagePath); err != nil {
 			return err
 		}
@@ -238,7 +238,7 @@ func extractArtifactZip(r io.Reader, dest string) error {
 	if err != nil {
 		return fmt.Errorf("open gzip entry: %w", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 
 	if err := clearDir(dest); err != nil {
 		return err
