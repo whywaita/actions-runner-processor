@@ -66,7 +66,7 @@ func TestOffsetWriterConcurrentOrder(t *testing.T) {
 		wg.Add(1)
 		go func(idx int, o int64) {
 			defer wg.Done()
-			if _, err := (offsetWriter{f, o}).Write(parts[idx]); err != nil {
+			if _, err := (&offsetWriter{f: f, o: o}).Write(parts[idx]); err != nil {
 				t.Errorf("write part %d: %v", idx, err)
 			}
 		}(i, off)

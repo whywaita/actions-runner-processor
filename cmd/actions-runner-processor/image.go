@@ -192,7 +192,7 @@ func installFullFromRelease(owner, repo, tagName, imagePath string, concurrency 
 	// Download parts and concatenate them into a temp file on the same
 	// filesystem as imagePath (NOT os.TempDir(): /tmp is often a small tmpfs,
 	// and the reconstructed tarball is many GB). Remove the file on return.
-	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+	if err = os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		return fmt.Errorf("create temp dir %s: %w", filepath.Dir(imagePath), err)
 	}
 	// Parts are independent; fetch them concurrently and write each to its
@@ -209,7 +209,7 @@ func installFullFromRelease(owner, repo, tagName, imagePath string, concurrency 
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if err := tmp.Truncate(totalSize(parts)); err != nil {
+	if err = tmp.Truncate(totalSize(parts)); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("preallocate %s: %w", tmpName, err)
 	}
@@ -228,23 +228,12 @@ func installFullFromRelease(owner, repo, tagName, imagePath string, concurrency 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			f, err := os.OpenFile(tmpName, os.O_WRONLY, 0)
-			if err != nil {
+			if werr := downloadReleasePart(tmpName, part, off); werr != nil {
 				mu.Lock()
 				if firstErr == nil {
-					firstErr = err
+					firstErr = werr
 				}
 				mu.Unlock()
-				return
-			}
-			defer func() { _ = f.Close() }()
-			if err := appendReleaseAssetPart(f, part, off); err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
-				return
 			}
 		}(a, offset)
 		offset += a.Size
@@ -275,6 +264,18 @@ func installFullFromRelease(owner, repo, tagName, imagePath string, concurrency 
 	return nil
 }
 
+// downloadReleasePart opens the concat temp file and downloads a single split
+// part into it at the given offset. Kept as a helper so the goroutine body has
+// its own error scope (avoids govet shadow warnings on the caller's err).
+func downloadReleasePart(tmpName string, a client.ReleaseAsset, off int64) error {
+	f, err := os.OpenFile(tmpName, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return appendReleaseAssetPart(f, a, off)
+}
+
 // appendReleaseAssetPart downloads a single split part asset and writes it into
 // f at the given byte offset (preserving concatenation order across concurrent
 // part downloads).
@@ -288,7 +289,8 @@ func appendReleaseAssetPart(f *os.File, a client.ReleaseAsset, off int64) error 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: HTTP %s", a.Name, resp.Status)
 	}
-	if _, err := io.Copy(offsetWriter{f, off}, resp.Body); err != nil {
+	ow := &offsetWriter{f: f, o: off}
+	if _, err := io.Copy(ow, resp.Body); err != nil {
 		return fmt.Errorf("copy %s: %w", a.Name, err)
 	}
 	return nil
@@ -296,13 +298,14 @@ func appendReleaseAssetPart(f *os.File, a client.ReleaseAsset, off int64) error 
 
 // offsetWriter wraps an *os.File so that io.Copy writes land at the given byte
 // offset (WriteAt) instead of appending, letting concurrent parts be written in
-// any order without corrupting the reconstruction.
+// any order without corrupting the reconstruction. Pointer receiver so the
+// running offset is reflected across multiple Write chunks.
 type offsetWriter struct {
 	f *os.File
 	o int64
 }
 
-func (w offsetWriter) Write(p []byte) (int, error) {
+func (w *offsetWriter) Write(p []byte) (int, error) {
 	n, err := w.f.WriteAt(p, w.o)
 	w.o += int64(n)
 	return n, err
