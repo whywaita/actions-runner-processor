@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/whywaita/actions-runner-processor/internal/client"
@@ -51,13 +52,14 @@ func runImageCmd(args []string) int {
 // usageImage prints the `image` subcommand usage.
 func usageImage() {
 	fmt.Fprintln(os.Stderr, `usage:
-  actions-runner-processor image install-full [--release <tag|release-url>] [--image-path <path>]
+  actions-runner-processor image install-full [--release <tag|release-url>] [--image-path <path>] [--concurrency <n>]
   actions-runner-processor image install-full --url <tarball-url> [--image-path <path>]
   actions-runner-processor image install-full --from-actions [--owner <o> --repo <r>] [--artifact-prefix <p>] [--image-path <path>]
 
 Download and expand the full runner image into the image subvolume (btrfs enforced).
-Default pulls the split parts of the newest release (no auth needed); --release
-selects a specific tag or release URL. --url fetches a single operator-hosted
+Default pulls the split parts of the newest release in parallel (no auth needed);
+--release selects a specific tag or release URL, --concurrency caps simultaneous
+part downloads (0 = all in parallel). --url fetches a single operator-hosted
 tarball; --from-actions pulls the latest build-image-full action artifact.`)
 }
 
@@ -70,6 +72,7 @@ func cmdInstallFullImage(args []string) int {
 	repo := fs.String("repo", "actions-runner-processor", "GitHub repository (default: actions-runner-processor)")
 	artifactPrefix := fs.String("artifact-prefix", "actions-runner-image-full", "artifact name prefix to match")
 	imagePath := fs.String("image-path", "", "runner image subvolume (default: config image_path or /opt/runner-btrfs/image)")
+	concurrency := fs.Int("concurrency", 0, "max simultaneous part downloads (0 = all parts in parallel)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -97,7 +100,7 @@ func cmdInstallFullImage(args []string) int {
 		*imagePath = "/opt/runner-btrfs/image"
 	}
 
-	if err := installFullImage(*release, *url, *fromActions, *owner, *repo, *artifactPrefix, *imagePath); err != nil {
+	if err := installFullImage(*release, *url, *fromActions, *owner, *repo, *artifactPrefix, *imagePath, *concurrency); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
@@ -109,7 +112,7 @@ func cmdInstallFullImage(args []string) int {
 //   - --release: split parts of a specific or latest GitHub release (public, no auth)
 //   - --url: a single operator-hosted tar.gz
 //   - --from-actions: the latest build-image-full action artifact (GitHub App auth)
-func installFullImage(release, url string, fromActions bool, owner, repo, artifactPrefix, imagePath string) error {
+func installFullImage(release, url string, fromActions bool, owner, repo, artifactPrefix, imagePath string, concurrency int) error {
 	if err := ensureImageSubvolume(imagePath); err != nil {
 		return err
 	}
@@ -118,7 +121,7 @@ func installFullImage(release, url string, fromActions bool, owner, repo, artifa
 	case release != "":
 		tag := resolveReleaseTag(release)
 		fmt.Printf("fetching split full image from release %s (%s)\n", tag, owner+"/"+repo)
-		if err := installFullFromRelease(owner, repo, tag, imagePath); err != nil {
+		if err := installFullFromRelease(owner, repo, tag, imagePath, concurrency); err != nil {
 			return err
 		}
 	case url != "":
@@ -141,7 +144,7 @@ func installFullImage(release, url string, fromActions bool, owner, repo, artifa
 	default:
 		// No source given: default to the latest release (no auth needed).
 		fmt.Printf("fetching split full image from the latest release (%s)\n", owner+"/"+repo)
-		if err := installFullFromRelease(owner, repo, "", imagePath); err != nil {
+		if err := installFullFromRelease(owner, repo, "", imagePath, concurrency); err != nil {
 			return err
 		}
 	}
@@ -165,7 +168,7 @@ func resolveReleaseTag(release string) string {
 
 // installFullFromRelease downloads the split parts of the given release
 // (tagName=="" means the latest release) and expands the reconstructed tarball.
-func installFullFromRelease(owner, repo, tagName, imagePath string) error {
+func installFullFromRelease(owner, repo, tagName, imagePath string, concurrency int) error {
 	ctx := context.Background()
 	assets, err := client.ListReleaseAssets(ctx, owner, repo, tagName)
 	if err != nil {
@@ -192,22 +195,63 @@ func installFullFromRelease(owner, repo, tagName, imagePath string) error {
 	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		return fmt.Errorf("create temp dir %s: %w", filepath.Dir(imagePath), err)
 	}
+	// Parts are independent; fetch them concurrently and write each to its
+	// pre-allocated offset (bytes are sequential from the split, so WriteAt
+	// preserves the ordering regardless of completion order). Concurrency
+	// default is all parts at once; a smaller value bounds bandwidth/disk
+	// on slow links or small hosts.
+	if concurrency <= 0 {
+		concurrency = len(parts)
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(imagePath), "actions-runner-image-full-*.tar.gz")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	for _, a := range parts {
-		fmt.Printf("downloading %s (%s)\n", a.Name, humanSize(a.Size))
-		err = appendReleaseAssetPart(tmp, a)
-		if err != nil {
-			return err
-		}
+	if err := tmp.Truncate(totalSize(parts)); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("preallocate %s: %w", tmpName, err)
 	}
-	err = tmp.Close()
-	if err != nil {
-		return err
+	_ = tmp.Close()
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		sem      = make(chan struct{}, concurrency)
+		offset   int64
+	)
+	for _, a := range parts {
+		wg.Add(1)
+		go func(part client.ReleaseAsset, off int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			f, err := os.OpenFile(tmpName, os.O_WRONLY, 0)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			defer func() { _ = f.Close() }()
+			if err := appendReleaseAssetPart(f, part, off); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+		}(a, offset)
+		offset += a.Size
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
 	}
 
 	f, err := os.Open(tmpName)
@@ -231,9 +275,11 @@ func installFullFromRelease(owner, repo, tagName, imagePath string) error {
 	return nil
 }
 
-// appendReleaseAssetPart downloads a single split part asset and appends it to
-// the concatenation file f, preserving byte order for later reconstruction.
-func appendReleaseAssetPart(f *os.File, a client.ReleaseAsset) error {
+// appendReleaseAssetPart downloads a single split part asset and writes it into
+// f at the given byte offset (preserving concatenation order across concurrent
+// part downloads).
+func appendReleaseAssetPart(f *os.File, a client.ReleaseAsset, off int64) error {
+	fmt.Printf("downloading %s (%s) -> offset %d\n", a.Name, humanSize(a.Size), off)
 	resp, err := http.Get(a.DownloadURL)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", a.Name, err)
@@ -242,10 +288,33 @@ func appendReleaseAssetPart(f *os.File, a client.ReleaseAsset) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: HTTP %s", a.Name, resp.Status)
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(offsetWriter{f, off}, resp.Body); err != nil {
 		return fmt.Errorf("copy %s: %w", a.Name, err)
 	}
 	return nil
+}
+
+// offsetWriter wraps an *os.File so that io.Copy writes land at the given byte
+// offset (WriteAt) instead of appending, letting concurrent parts be written in
+// any order without corrupting the reconstruction.
+type offsetWriter struct {
+	f *os.File
+	o int64
+}
+
+func (w offsetWriter) Write(p []byte) (int, error) {
+	n, err := w.f.WriteAt(p, w.o)
+	w.o += int64(n)
+	return n, err
+}
+
+// totalSize sums the byte sizes of all parts.
+func totalSize(parts []client.ReleaseAsset) int64 {
+	var n int64
+	for _, a := range parts {
+		n += a.Size
+	}
+	return n
 }
 
 // humanSize formats a byte count for progress output.
