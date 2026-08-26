@@ -137,6 +137,9 @@ sudo actions-runner-processor image install-full
 # A specific release, by tag or release page URL
 sudo actions-runner-processor image install-full --release v0.0.5
 sudo actions-runner-processor image install-full --release https://github.com/whywaita/actions-runner-processor/releases/tag/v0.0.5
+
+# Bound the maximum number of simultaneous part downloads (0 = all at once)
+sudo actions-runner-processor image install-full --concurrency 4
 ```
 
 There are also two lower-level sources:
