@@ -157,6 +157,62 @@ subvolume (`/opt/runner-btrfs/image`), and enforce the btrfs requirement.
 
 Expand it to `runner.image_path` the same way as the lightweight image.
 
+#### Preparing the btrfs backing (fresh machine)
+
+`image install-full` and the processor both require the image path
+(`--image-path`, default `/opt/runner-btrfs/image`) to live on, and be a
+subvolume of, a **btrfs** filesystem. systemd-nspawn boots each runner with
+`--ephemeral`, which CoW-snapshots the image subvolume per job; on an
+ext4/non-subvolume backing that would degrade to a full copy per job, so it is
+enforced rather than silently slow. Running it on a host where
+`/opt/runner-btrfs` is not a btrfs mount fails with:
+
+```
+error: parent /opt/runner-btrfs is not on a btrfs filesystem (btrfs is enforced); mount a btrfs backing there (see deploy/setup.sh)
+```
+
+**Easiest path — install the `.deb` via `deploy/setup.sh`.** Its postinst
+`ensure_btrfs()` provisions the backing for you: creates a loopback image
+(`/var/lib/actions-runner-processor/runner-btrfs.img`), mounts it at
+`/opt/runner-btrfs` through a systemd `.mount` unit (persistent across
+reboot), and creates the `image` subvolume.
+
+**Manual path — binary only.** Set the backing up yourself before running
+`image install-full`:
+
+```bash
+sudo apt-get install -y btrfs-progs
+
+# Create the loopback image (size it per the note below) and mount it at /opt/runner-btrfs.
+sudo truncate -s 60G /var/lib/actions-runner-processor/runner-btrfs.img
+sudo mkfs.btrfs /var/lib/actions-runner-processor/runner-btrfs.img
+sudo mkdir -p /opt/runner-btrfs
+sudo mount -o loop /var/lib/actions-runner-processor/runner-btrfs.img /opt/runner-btrfs
+
+# Persist across reboot (systemd mount unit).
+echo '/var/lib/actions-runner-processor/runner-btrfs.img /opt/runner-btrfs btrfs loop,nofail 0 0' \
+  | sudo tee /etc/systemd/system/actions-runner-btrfs.mount
+systemctl daemon-reload && systemctl enable actions-runner-btrfs.mount
+
+# Create the runner-image subvolume that actions-runner-processor boots from.
+sudo mkdir -p /opt/runner-btrfs/image
+sudo btrfs subvolume create /opt/runner-btrfs/image
+```
+
+**Sizing matters.** `image install-full` reconstructs the split tarball
+(~21G for the full image) then expands it (lightweight ~1.5G, **full
+GitHub-hosted ~50G+**), plus per-job CoW upper layers. The deb postinstall's
+default backing size is 20G — fine for the lightweight image but **too small
+for the full image**. For the full image, provision a larger loopback (e.g.
+60–80G) via the manual path above, or enlarge before installing.
+
+Verify the backing before retrying:
+
+```bash
+findmnt -t btrfs /opt/runner-btrfs                # must show btrfs
+sudo btrfs subvolume show /opt/runner-btrfs/image # must be a subvolume
+```
+
 ### Configuration
 
 Create `/etc/actions-runner-processor/config.yaml`:
