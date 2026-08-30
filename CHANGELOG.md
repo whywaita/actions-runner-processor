@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.6](https://github.com/whywaita/actions-runner-processor/compare/v0.0.5...v0.0.6) - 2026-08-30
+
+- feat: distribute the full runner image as split release parts by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/17
+
 ## [v0.0.5](https://github.com/whywaita/actions-runner-processor/compare/v0.0.4...v0.0.5) - 2026-08-26
 
 - feat: switch sandbox backend from bubblewrap to systemd-nspawn (custom image + sudo) by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/11
