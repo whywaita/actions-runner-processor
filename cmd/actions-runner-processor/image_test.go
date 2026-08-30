@@ -1,9 +1,13 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -79,5 +83,96 @@ func TestOffsetWriterConcurrentOrder(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("concurrent offset writes produced wrong order:\ngot  %x...\nwant %x...", got[:8], want[:8])
+	}
+}
+
+// TestExtractTarPreservesOwnership verifies that install-full expansion applies
+// the tar headers' uid/gid to extracted entries — the fix for the runner being
+// unable to write /opt/actions-runner and /home/runner after a split-part install.
+func TestExtractTarPreservesOwnership(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to chown extracted entries")
+	}
+	// UID/GID for the container runner user.
+	const uid, gid = 1001, 1001
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	// /opt/actions-runner owned by the runner user.
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "opt/actions-runner/",
+		Typeflag: tar.TypeDir,
+		Mode:     0o755,
+		Uid:      uid,
+		Gid:      gid,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file inside it, also runner-owned, with a distinctive mode.
+	const content = "hello"
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "opt/actions-runner/run.sh",
+		Typeflag: tar.TypeReg,
+		Mode:     0o750,
+		Size:     int64(len(content)),
+		Uid:      uid,
+		Gid:      gid,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink, also runner-owned (must use Lchown, not Chown).
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "opt/actions-runner/self",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "run.sh",
+		Uid:      uid,
+		Gid:      gid,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := extractTar(bytes.NewReader(buf.Bytes()), dest); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(p string, wantMode os.FileMode) {
+		t.Helper()
+		st, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat, ok := st.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("%s: Stat_t unavailable (%T)", p, st.Sys())
+		}
+		if stat.Uid != uint32(uid) || stat.Gid != uint32(gid) {
+			t.Errorf("%s: uid/gid = %d/%d, want %d/%d", p, stat.Uid, stat.Gid, uid, gid)
+		}
+		if got := st.Mode().Perm(); got != wantMode {
+			t.Errorf("%s: mode = %o, want %o", p, got, wantMode)
+		}
+	}
+	check(filepath.Join(dest, "opt/actions-runner"), 0o755)
+	check(filepath.Join(dest, "opt/actions-runner/run.sh"), 0o750)
+	check(filepath.Join(dest, "opt/actions-runner/self"), 0o777) // symlink perms are stubbed, only ownership matters
+
+	// Content must survive the copy too.
+	got, err := os.ReadFile(filepath.Join(dest, "opt/actions-runner/run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != content {
+		t.Errorf("run.sh content = %q, want %q", got, content)
 	}
 }

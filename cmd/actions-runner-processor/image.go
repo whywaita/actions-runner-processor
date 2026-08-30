@@ -480,6 +480,10 @@ func isBtrfsSubvolume(path string) bool {
 
 // extractTar reads a (possibly gzipped) tar stream from r and writes its
 // entries under dest. Handles directories, regular files, and symlinks.
+// Ownership (uid/gid) and mode are applied from the tar headers, matching the
+// GitHub layout where the runner user owns /opt/actions-runner and /home/runner.
+// Without this, install-full expanded every entry as the invoking (root) user
+// and the runner (uid 1001) could not write its home/tool dirs at runtime.
 func extractTar(r io.Reader, dest string) error {
 	tr := tar.NewReader(r)
 	for {
@@ -493,14 +497,23 @@ func extractTar(r io.Reader, dest string) error {
 		target := filepath.Join(dest, hdr.Name)
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)&0o777); err != nil {
+				return err
+			}
+			if err := os.Chown(target, hdr.Uid, hdr.Gid); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
+			// Remove any placeholder from a prior entry of the same name so a
+			// stale directory doesn't make os.Symlink fail with EEXIST.
+			// (MkdirAll above only creates parents — target itself is fresh.)
 			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return err
+			}
+			if err := os.Lchown(target, hdr.Uid, hdr.Gid); err != nil {
 				return err
 			}
 		case tar.TypeReg:
@@ -516,6 +529,9 @@ func extractTar(r io.Reader, dest string) error {
 				return err
 			}
 			if err := f.Close(); err != nil {
+				return err
+			}
+			if err := os.Chown(target, hdr.Uid, hdr.Gid); err != nil {
 				return err
 			}
 		default:
