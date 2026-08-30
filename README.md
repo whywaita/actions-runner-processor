@@ -124,28 +124,94 @@ sudo bash image/build-image-full.sh /tmp/runner-image-full
 # → /tmp/runner-image-full/actions-runner-image-full-amd64.tar.gz
 ```
 
-The full image is too large for a GitHub Release asset, so it is not shipped.
-Two ways to install it onto the runner host:
-
-1. From an operator-hosted URL:
+The full image is too large for a single GitHub Release asset (2GB/file cap),
+so it is built on demand (`build-image-full` workflow), split into <2GB parts,
+and published to the repository's **newest release** as
+`actions-runner-image-full-<arch>.tar.gz.part-000, .part-001, ...`.
+Install it onto the runner host with:
 
 ```bash
-sudo actions-runner-processor image install-full --url https://example.com/actions-runner-image-full-amd64.tar.gz
+# Default: newest release (no GitHub credentials needed)
+sudo actions-runner-processor image install-full
+
+# A specific release, by tag or release page URL
+sudo actions-runner-processor image install-full --release v0.0.5
+sudo actions-runner-processor image install-full --release https://github.com/whywaita/actions-runner-processor/releases/tag/v0.0.5
+
+# Bound the maximum number of simultaneous part downloads (0 = all at once)
+sudo actions-runner-processor image install-full --concurrency 4
 ```
 
-2. Directly from the repository's Actions build artifacts (uses the GitHub App
-   credentials from the config; no externally-hosted URL needed). This pulls
-   the most recent unexpired `actions-runner-image-full` artifact (defaults to
-   `whywaita/actions-runner-processor`; override with `--owner`/`--repo`):
+There are also two lower-level sources:
 
 ```bash
+# A single operator-hosted tarball
+sudo actions-runner-processor image install-full --url https://example.com/actions-runner-image-full-amd64.tar.gz
+
+# The latest build-image-full action artifact (GitHub App auth from config)
 sudo actions-runner-processor image install-full --from-actions
 ```
 
-Both download, expand into the btrfs runner-image subvolume
-(`/opt/runner-btrfs/image`), and enforce the btrfs requirement.
+All modes download, concatenate/reconstruct, expand into the btrfs runner-image
+subvolume (`/opt/runner-btrfs/image`), and enforce the btrfs requirement.
 
 Expand it to `runner.image_path` the same way as the lightweight image.
+
+#### Preparing the btrfs backing (fresh machine)
+
+`image install-full` and the processor both require the image path
+(`--image-path`, default `/opt/runner-btrfs/image`) to live on, and be a
+subvolume of, a **btrfs** filesystem. systemd-nspawn boots each runner with
+`--ephemeral`, which CoW-snapshots the image subvolume per job; on an
+ext4/non-subvolume backing that would degrade to a full copy per job, so it is
+enforced rather than silently slow. Running it on a host where
+`/opt/runner-btrfs` is not a btrfs mount fails with:
+
+```
+error: parent /opt/runner-btrfs is not on a btrfs filesystem (btrfs is enforced); mount a btrfs backing there (see deploy/setup.sh)
+```
+
+**Easiest path — install the `.deb` via `deploy/setup.sh`.** Its postinst
+`ensure_btrfs()` provisions the backing for you: creates a loopback image
+(`/var/lib/actions-runner-processor/runner-btrfs.img`), mounts it at
+`/opt/runner-btrfs` through a systemd `.mount` unit (persistent across
+reboot), and creates the `image` subvolume.
+
+**Manual path — binary only.** Set the backing up yourself before running
+`image install-full`:
+
+```bash
+sudo apt-get install -y btrfs-progs
+
+# Create the loopback image (size it per the note below) and mount it at /opt/runner-btrfs.
+sudo truncate -s 60G /var/lib/actions-runner-processor/runner-btrfs.img
+sudo mkfs.btrfs /var/lib/actions-runner-processor/runner-btrfs.img
+sudo mkdir -p /opt/runner-btrfs
+sudo mount -o loop /var/lib/actions-runner-processor/runner-btrfs.img /opt/runner-btrfs
+
+# Persist across reboot (systemd mount unit).
+echo '/var/lib/actions-runner-processor/runner-btrfs.img /opt/runner-btrfs btrfs loop,nofail 0 0' \
+  | sudo tee /etc/systemd/system/actions-runner-btrfs.mount
+systemctl daemon-reload && systemctl enable actions-runner-btrfs.mount
+
+# Create the runner-image subvolume that actions-runner-processor boots from.
+sudo mkdir -p /opt/runner-btrfs/image
+sudo btrfs subvolume create /opt/runner-btrfs/image
+```
+
+**Sizing matters.** `image install-full` reconstructs the split tarball
+(~21G for the full image) then expands it (lightweight ~1.5G, **full
+GitHub-hosted ~50G+**), plus per-job CoW upper layers. The deb postinstall's
+default backing size is 20G — fine for the lightweight image but **too small
+for the full image**. For the full image, provision a larger loopback (e.g.
+60–80G) via the manual path above, or enlarge before installing.
+
+Verify the backing before retrying:
+
+```bash
+findmnt -t btrfs /opt/runner-btrfs                # must show btrfs
+sudo btrfs subvolume show /opt/runner-btrfs/image # must be a subvolume
+```
 
 ### Configuration
 
@@ -345,6 +411,10 @@ golangci-lint run
 GitHub Actions workflows (`build` + `release`) are in `.github/workflows/`:
 
 - **build** — `go build`, `go test -race`, `go vet`, `golangci-lint` on PR
+- **build-image** — lightweight image artifact on push/PR (`image/**`)
+- **build-image-full** — heavy (1h, 50GB+) full-image build; dispatch-only.
+  Splits the tarball into <2GB parts and publishes them to the newest release
+  via `gh release upload --clobber`
 - **release** — tagpr + GoReleaser on main push or `v*` tag push
 
 GoReleaser produces `actions-runner-processor_<version>_linux_<arch>.tar.gz`

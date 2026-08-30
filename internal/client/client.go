@@ -402,6 +402,51 @@ func DownloadArtifact(ctx context.Context, auth GitHubAuth, owner, repo string, 
 	return nil
 }
 
+// ReleaseAsset describes a Release asset (used for the split full-image
+// distribution).
+type ReleaseAsset struct {
+	Name        string `json:"name"`
+	Size        int64  `json:"size"`
+	DownloadURL string `json:"browser_download_url"`
+}
+
+// releaseResponse mirrors a subset of the GitHub Releases API response.
+type releaseResponse struct {
+	TagName string         `json:"tag_name"`
+	Assets  []ReleaseAsset `json:"assets"`
+}
+
+// LATEST_RELEASE returns the assets of the given release, or of the newest
+// release when tagName is empty. Public releases are read without
+// authentication, so any user can fetch the split full image.
+func ListReleaseAssets(ctx context.Context, owner, repo, tagName string) ([]ReleaseAsset, error) {
+	apiURL := "https://api.github.com"
+	path := fmt.Sprintf("%s/repos/%s/%s/releases", apiURL, owner, repo)
+	if tagName == "" {
+		path += "/latest"
+	} else {
+		path += "/tags/" + tagName
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create release request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list release assets: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list release assets: status %d", resp.StatusCode)
+	}
+	var r releaseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return nil, fmt.Errorf("decode release: %w", err)
+	}
+	return r.Assets, nil
+}
+
 // createAppJWT generates a JWT for GitHub App authentication.
 func createAppJWT(clientID, privateKey string) (string, error) {
 	key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(privateKey))

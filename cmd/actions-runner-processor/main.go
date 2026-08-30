@@ -315,7 +315,9 @@ func usage() {
 Usage:
   actions-runner-processor                     run the processor daemon
   actions-runner-processor image install-full  download + expand the full runner image
-    --url <tarball-url>                        URL of the full image tar.gz
+    [--release <tag|release-url>]             split parts of a specific release
+                                               (default: newest release, no auth)
+    --url <tarball-url>                        URL of a single full image tar.gz
     --from-actions [--owner <o>] [--repo <r>]  pull the latest build-image-full artifact
                                                (GitHub App auth from config; defaults to
                                                whywaita/actions-runner-processor; optional
