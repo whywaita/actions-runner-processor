@@ -88,7 +88,8 @@ sudo OUTPUT_DIR=/tmp/img bash image/build-image.sh
 **Or let CI bake it** — `.github/workflows/build-image.yaml` runs
 `image/build-image.sh` (on `workflow_dispatch`, or on push/PR touching
 `image/**`) and uploads the rootfs tarball as an artifact. The full image uses
-a separate, dispatch-only workflow: `.github/workflows/build-image-full.yaml`.
+a separate workflow: `.github/workflows/build-image-full.yaml` (dispatch, or
+auto-run from the release workflow so each Release ships a fresh full image).
 
 **Expand to the host** (`runner.image_path`, default `/opt/runner-btrfs/image`):
 
@@ -412,7 +413,9 @@ GitHub Actions workflows (`build` + `release`) are in `.github/workflows/`:
 
 - **build** — `go build`, `go test -race`, `go vet`, `golangci-lint` on PR
 - **build-image** — lightweight image artifact on push/PR (`image/**`)
-- **build-image-full** — heavy (1h, 50GB+) full-image build; dispatch-only.
+- **build-image-full** — heavy (1h, 50GB+) full-image build; dispatch-only,
+  and auto-triggered from the `release` workflow after goreleaser so every
+  GitHub Release ships with a fresh full image.
   Splits the tarball into <2GB parts and publishes them to the newest release
   via `gh release upload --clobber`
 - **release** — tagpr + GoReleaser on main push or `v*` tag push
