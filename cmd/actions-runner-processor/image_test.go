@@ -124,6 +124,23 @@ func TestExtractTarPreservesOwnership(t *testing.T) {
 	if _, err := tw.Write([]byte(content)); err != nil {
 		t.Fatal(err)
 	}
+	// A root-owned setuid binary (sudo: 4755). Regression guard for issue #22:
+	// extractTar must preserve the setuid/setgid bits, which a naive
+	// mode&0o777 and/or a chmod-before-chown ordering would drop.
+	const sucontent = "sudo"
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "usr/bin/sudo",
+		Typeflag: tar.TypeReg,
+		Mode:     0o4755,
+		Size:     int64(len(sucontent)),
+		Uid:      0,
+		Gid:      0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(sucontent)); err != nil {
+		t.Fatal(err)
+	}
 	// A symlink, also runner-owned (must use Lchown, not Chown).
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "opt/actions-runner/self",
@@ -167,6 +184,20 @@ func TestExtractTarPreservesOwnership(t *testing.T) {
 	check(filepath.Join(dest, "opt/actions-runner/run.sh"), 0o750)
 	check(filepath.Join(dest, "opt/actions-runner/self"), 0o777) // symlink perms are stubbed, only ownership matters
 
+	// sudo must retain its setuid bit (0o4000 in unix mode == ModeSetuid);
+	// st.Mode() surfaces ModeSetuid, unlike .Perm().
+	suPath := filepath.Join(dest, "usr/bin/sudo")
+	sust, err := os.Lstat(suPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sust.Mode()&os.ModeSetuid == 0 {
+		t.Errorf("usr/bin/sudo lost setuid bit: mode=%v (want ModeSetuid)", sust.Mode())
+	}
+	if perms := sust.Mode().Perm(); perms != 0o755 {
+		t.Errorf("usr/bin/sudo perms = %o, want 755", perms)
+	}
+
 	// Content must survive the copy too.
 	got, err := os.ReadFile(filepath.Join(dest, "opt/actions-runner/run.sh"))
 	if err != nil {
@@ -174,5 +205,27 @@ func TestExtractTarPreservesOwnership(t *testing.T) {
 	}
 	if string(got) != content {
 		t.Errorf("run.sh content = %q, want %q", got, content)
+	}
+}
+
+// TestTarModeToFileMode verifies that raw Unix tar mode bits (setuid 0o4000,
+// setgid 0o2000, sticky 0o1000) are re-mapped into os.FileMode's special-bit
+// layout. This is the core of the sudo setuid fix and runs without root.
+func TestTarModeToFileMode(t *testing.T) {
+	tests := []struct {
+		raw  int64
+		want os.FileMode
+	}{
+		{0o755, 0o755},
+		{0o4755, 0o755 | os.ModeSetuid},
+		{0o2755, 0o755 | os.ModeSetgid},
+		{0o1755, 0o755 | os.ModeSticky},
+		{0o4755 | 0o2000, 0o755 | os.ModeSetuid | os.ModeSetgid},
+		{0o4750, 0o750 | os.ModeSetuid},
+	}
+	for _, tc := range tests {
+		if got := tarModeToFileMode(tc.raw); got != tc.want {
+			t.Errorf("tarModeToFileMode(%#o) = %v, want %v", tc.raw, got, tc.want)
+		}
 	}
 }

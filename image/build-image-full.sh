@@ -413,6 +413,19 @@ done
 # The runner-images scripts (running as root) may have written tool caches
 # under /home/runner — hand them back to the runner user so the image matches
 # the GitHub layout where the runner user owns its home directory.
+
+# Docker access at runtime: install-docker.sh creates the `docker` group and a
+# root:docker 0770 socket (via /etc/tmpfiles.d/docker.conf) so members of the
+# docker group can run `docker` without sudo. The runner user was created
+# BEFORE docker was installed, so it is not in the group yet — add it now so job
+# steps can reach dockerd (issue #22: "permission denied while trying to connect
+# to the Docker daemon socket").
+if getent group docker >/dev/null 2>&1; then
+  gpasswd -a runner docker
+else
+  echo "warning: docker group not found; skipping runner docker group membership" >&2
+fi
+
 chown -R runner:runner /home/runner
 
 echo "PROVISION DONE"
