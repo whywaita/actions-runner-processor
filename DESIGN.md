@@ -249,7 +249,7 @@ image/
 ├── image-full.yaml      # manifest for the full image
 ├── build-image-full.sh  # full: debootstrap + nspawn + runner-images scripts
 └── (built by) .github/workflows/build-image.yaml      # lightweight
-    and .github/workflows/build-image-full.yaml        # full (dispatch-only)
+    and .github/workflows/build-image-full.yaml        # full (dispatch / release)
 ```
 
 **Lightweight (option B, default)** — `image/build-image.sh` debootstraps the
@@ -279,7 +279,8 @@ GitHub-hosted-compatible toolset. `actions/runner-images` is built by running
 loop over these shell scripts), so this script debootstraps a base, boots it
 in a `systemd-nspawn` container (`--boot`), and runs the same build scripts
 directly inside with the repo bind-mounted. **No LXD or Packer is needed.**
-Heavy (~1h, 50GB+), gated on `workflow_dispatch` via the
+Heavy (~1h, 50GB+), gated on `workflow_dispatch` / auto-run from the `release`
+workflow via the
 `.github/workflows/build-image-full.yaml` workflow (separate from the
 lightweight build so the PR view stays clean).
 

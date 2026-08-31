@@ -1,9 +1,18 @@
 # Build the full GitHub-hosted-compatible actions-runner-processor image
-# (heavy: ~1h, 50GB+). Dispatch-only so it never runs on PRs/pushes. Expand the
-# artifact to runner.image_path (default /opt/runner-btrfs/image).
+# (heavy: ~1h, 50GB+). Dispatch-only so it never runs on PRs/pushes, plus
+# callable from the release workflow (workflow_call) so each GitHub Release
+# also ships a fresh full image. Expand the artifact to runner.image_path
+# (default /opt/runner-btrfs/image).
 name: build-image-full
 
 on:
+  workflow_call:
+    inputs:
+      release:
+        description: 'Ubuntu release for the full image (22.04 or 24.04)'
+        required: false
+        default: '24.04'
+        type: string
   workflow_dispatch:
     inputs:
       release:
