@@ -169,12 +169,13 @@ install_image_rootfs() {
   # Provision the btrfs backing mount + image subvolume before extracting, so a
   # clean host never runs mktemp against a nonexistent directory. The image MUST
   # be a btrfs subvolume for systemd-nspawn --ephemeral CoW snapshots -- btrfs is
-  # enforced (no ext4 copy-per-job fallback); see deploy/setup.sh which creates a
+  # enforced (no ext4 copy-per-job fallback); provision it with
+  # `actions-runner-processor setup --image lightweight|full` which creates the
   # loopback btrfs backing at $IMAGE_MOUNT.
   mkdir -p "$IMAGE_MOUNT"
   if ! btrfs subvolume show "$IMAGE_SUBVOL" >/dev/null 2>&1; then
     btrfs subvolume create "$IMAGE_SUBVOL" 2>/dev/null \
-      || die "$IMAGE_MOUNT is not on a btrfs filesystem; the runner image must be a btrfs subvolume (btrfs is enforced). Create a btrfs mount at $IMAGE_MOUNT first (see deploy/setup.sh)."
+      || die "$IMAGE_MOUNT is not on a btrfs filesystem; the runner image must be a btrfs subvolume (btrfs is enforced). Create a btrfs mount at $IMAGE_MOUNT first (see 'actions-runner-processor setup')."
   fi
   tmpdir="$(mktemp -d "$IMAGE_MOUNT/.extract.XXXXXX")"
   log "expanding $tarball into $IMAGE_SUBVOL"

@@ -456,7 +456,7 @@ func ensureImageSubvolume(path string) error {
 	}
 	parent := filepath.Dir(path)
 	if !isBtrfs(parent) {
-		return fmt.Errorf("parent %s is not on a btrfs filesystem (btrfs is enforced); mount a btrfs backing there (see deploy/setup.sh)", parent)
+		return fmt.Errorf("parent %s is not on a btrfs filesystem (btrfs is enforced); provision a btrfs backing there via `actions-runner-processor setup`", parent)
 	}
 	if out, err := exec.Command("btrfs", "subvolume", "create", path).CombinedOutput(); err != nil {
 		return fmt.Errorf("create btrfs subvolume %s: %s", path, strings.TrimSpace(string(out)))

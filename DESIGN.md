@@ -209,7 +209,7 @@ func (r *Runner) Kill() error
 
 `ImagePath` (a custom rootfs directory) is booted via `--ephemeral`: systemd-nspawn CoW-snapshots the directory onto real disk, the container runs against the writable snapshot, and the snapshot is discarded when the container exits. A job can freely rewrite `/usr` with e.g. `sudo apt install` without affecting other jobs or the host.
 
-> **Why btrfs (enforced)**: systemd-nspawn's `--ephemeral` makes a cheap CoW snapshot only when the image directory is a **btrfs subvolume**; the processor enforces this at startup (fails if the image isn't on a btrfs subvolume), and `deploy/setup.sh` provisions a loopback btrfs at `/opt/runner-btrfs` automatically. On ext4 (or a plain btrfs directory) `--ephemeral` would fall back to a full recursive copy of the image per job, which is why non-btrfs is rejected. Since the image root lands on real disk (not a RAM tmpfs), job writes (toolchain caches, the runner home, `sudo apt install` into `/usr`) can never exhaust a small overlay with `ENOSPC`. `--ephemeral` writes `machine.<rand>` snapshot dirs next to it in the btrfs and discards them automatically on exit. No host bind is used today — the job workspace (`/opt/actions-runner/_work`) lives inside the discarded snapshot too, so there is no host-side workspace dir to bind or clean up.
+> **Why btrfs (enforced)**: systemd-nspawn's `--ephemeral` makes a cheap CoW snapshot only when the image directory is a **btrfs subvolume**; the processor enforces this at startup (fails if the image isn't on a btrfs subvolume), and `actions-runner-processor setup --image lightweight|full` provisions a loopback btrfs at `/opt/runner-btrfs` automatically. On ext4 (or a plain btrfs directory) `--ephemeral` would fall back to a full recursive copy of the image per job, which is why non-btrfs is rejected. Since the image root lands on real disk (not a RAM tmpfs), job writes (toolchain caches, the runner home, `sudo apt install` into `/usr`) can never exhaust a small overlay with `ENOSPC`. `--ephemeral` writes `machine.<rand>` snapshot dirs next to it in the btrfs and discards them automatically on exit. No host bind is used today — the job workspace (`/opt/actions-runner/_work`) lives inside the discarded snapshot too, so there is no host-side workspace dir to bind or clean up.
 
 ```bash
 # Boot a runner per job in an nspawn container
@@ -290,6 +290,37 @@ The tarball is expanded to `runner.image_path` (default `/opt/runner-btrfs/image
 sudo tar -xzf actions-runner-image-amd64.tar.gz -C /opt/runner-btrfs/image     # B
 sudo tar -xzf actions-runner-image-full-amd64.tar.gz -C /opt/runner-btrfs/image # A
 ```
+
+#### Host bootstrap: `setup` subcommand
+
+Historically the btrfs backing was provisioned in the deb `postinstall.sh`
+(`ensure_btrfs`) and the image/NAT/service wiring lived in `deploy/setup.sh`.
+Both are now absorbed into a single root-run subcommand so a host is brought up
+with one invocation:
+
+```bash
+sudo actions-runner-processor setup --image lightweight   # 20G default backing
+sudo actions-runner-processor setup --image full          # sized from the real image
+```
+
+A required `--image lightweight|full` selects the image kind, which drives the
+btrfs backing size:
+
+- `lightweight` → fixed **20G** default.
+- `full` → `max(compressedTarball×3, freeDisk×0.8)` where `compressedTarball`
+  is the real split-part total (resolved via the GitHub API before any
+  download); floored at 20G.
+
+The computed size is shown for operator confirmation; `--size <n>` forces a
+size with no prompt, `--yes` accepts the default non-interactively (CI). The
+backing file is sparse (`truncate -s`), so the logical size only bounds the
+btrfs usable capacity — physical disk is consumed on demand as data is written.
+
+The command then (in order): creates + formats + mounts the loopback btrfs
+(via a systemd `.mount` unit, persistent across reboot), creates the `image`
+subvolume, downloads and expands the selected image, configures host NAT for
+the runner zone, and enables the service. `deploy/setup.sh` is removed;
+`deploy/postinstall.sh` no longer provisions btrfs.
 
 ### 3.4 main entrypoint
 

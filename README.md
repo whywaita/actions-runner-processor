@@ -169,17 +169,28 @@ enforced rather than silently slow. Running it on a host where
 `/opt/runner-btrfs` is not a btrfs mount fails with:
 
 ```
-error: parent /opt/runner-btrfs is not on a btrfs filesystem (btrfs is enforced); mount a btrfs backing there (see deploy/setup.sh)
+error: parent /opt/runner-btrfs is not on a btrfs filesystem (btrfs is enforced); provision a btrfs backing there via `actions-runner-processor setup`
 ```
 
-**Easiest path — install the `.deb` via `deploy/setup.sh`.** Its postinst
-`ensure_btrfs()` provisions the backing for you: creates a loopback image
-(`/var/lib/actions-runner-processor/runner-btrfs.img`), mounts it at
-`/opt/runner-btrfs` through a systemd `.mount` unit (persistent across
-reboot), and creates the `image` subvolume.
+**Easiest path — run `setup`.** The `setup` subcommand is a one-shot host
+bootstrap: it provisions the backing for you (creates a loopback image
+`/var/lib/actions-runner-processor/runner-btrfs.img`), mounts it at
+`/opt/runner-btrfs` through a systemd `.mount` unit (persistent across reboot),
+creates the `image` subvolume, downloads and expands the selected image, sets up
+NAT, and enables the service:
 
-**Manual path — binary only.** Set the backing up yourself before running
-`image install-full`:
+```bash
+sudo actions-runner-processor setup --image lightweight   # 20G default
+sudo actions-runner-processor setup --image full          # sized from the real tarball + free disk
+```
+
+The required `--image` flag drives the default backing size (`lightweight`
+= 20G; `full` = `max(compressed-tarball × 3, 80% of free disk)`), shown for
+operator confirmation. Pass `--size <n>` (e.g. `--size 50G`) to force a size
+without prompting, or `--yes` to accept the computed default non-interactively.
+
+**Manual path — binary only (no image install).** Set the backing up yourself
+before running `image install-full`:
 
 ```bash
 sudo apt-get install -y btrfs-progs
@@ -202,10 +213,11 @@ sudo btrfs subvolume create /opt/runner-btrfs/image
 
 **Sizing matters.** `image install-full` reconstructs the split tarball
 (~21G for the full image) then expands it (lightweight ~1.5G, **full
-GitHub-hosted ~50G+**), plus per-job CoW upper layers. The deb postinstall's
-default backing size is 20G — fine for the lightweight image but **too small
-for the full image**. For the full image, provision a larger loopback (e.g.
-60–80G) via the manual path above, or enlarge before installing.
+GitHub-hosted ~50G+**), plus per-job CoW upper layers. The `setup` command
+sizes the backing accordingly (`--image full` uses the real tarball size × 3,
+max'ed against 80% of the free disk, sparse so physical disk grows on demand);
+for `image install-full` alone, provision a larger loopback (e.g. 60–80G) via
+the manual path above, or pass `--size`.
 
 Verify the backing before retrying:
 
@@ -302,22 +314,27 @@ needed — the runner boots directly from a short-lived JIT token.
 
 ### Install
 
-The easiest path is the setup script, which installs the latest release from
-GitHub Releases as a `.deb` (pulls `systemd-container`, the example config, the
-btrfs backing, and the systemd unit), provisions a **btrfs** runner-image
-subvolume, fetches the prebuilt **lightweight** image from the Release, wires
-host NAT for the runner zone, and enables the service:
+Install the processor binary (`.deb` from the latest GitHub Release pulls in
+`systemd-container`, the example config, and the systemd unit), then run
+`actions-runner-processor setup` — a one-shot bootstrap that provisions a
+**btrfs** runner-image subvolume, fetches and expands the selected image
+(lightweight or full), wires host NAT for the runner zone, and enables the
+service:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash
-# or install a specific version:
-curl -fsSL https://raw.githubusercontent.com/whywaita/actions-runner-processor/main/deploy/setup.sh | sudo bash -s v0.0.5
+# 1. Install the .deb (adjust version/arch as needed)
+curl -fsSL -o /tmp/arp.deb https://github.com/whywaita/actions-runner-processor/releases/latest/download/actions-runner-processor_0.0.7_amd64.deb
+sudo apt-get install -y /tmp/arp.deb
+
+# 2. One-shot bootstrap (lightweight = 20G default; full = sized from the image)
+sudo actions-runner-processor setup --image lightweight
+sudo actions-runner-processor setup --image full        # uses --size / --yes as needed
 ```
 
 The image is **required to be a btrfs subvolume** (the processor enforces this
 at startup and errors out otherwise), so running the runner on an ordinary ext4
-path is not supported. `setup.sh` creates a loopback btrfs backing at
-`/opt/runner-btrfs` automatically.
+path is not supported. `actions-runner-processor setup` creates a loopback btrfs
+backing at `/opt/runner-btrfs` automatically.
 
 Then edit `/etc/actions-runner-processor/config.yaml` (set `github.client_id` /
 `github.private_key_path`), place the GitHub App `.pem`, and:
@@ -387,7 +404,7 @@ systemd-nspawn \
   --machine=runner-<name>
 ```
 
-> `--ephemeral` CoW-snapshots the image directory onto real disk, boots the writable snapshot, and discards it on exit — so job writes (including `sudo apt install` into `/usr`) never touch a RAM overlay and can't hit `ENOSPC`. **btrfs is enforced**: the image must be a btrfs subvolume (the processor fails startup otherwise), and `deploy/setup.sh` provisions a loopback btrfs at `/opt/runner-btrfs` automatically. Set `runner.image_path` accordingly.
+> `--ephemeral` CoW-snapshots the image directory onto real disk, boots the writable snapshot, and discards it on exit — so job writes (including `sudo apt install` into `/usr`) never touch a RAM overlay and can't hit `ENOSPC`. **btrfs is enforced**: the image must be a btrfs subvolume (the processor fails startup otherwise), and `actions-runner-processor setup --image lightweight|full` provisions a loopback btrfs at `/opt/runner-btrfs` automatically. Set `runner.image_path` accordingly.
 
 > **Privacy / DNS / networking**: the container is booted with `--boot` so job steps can `systemctl start docker`. `--network-zone=rn-<runner-id>` (a per-runner zone) puts it in its own network namespace on its own nspawn-managed bridge, so concurrent jobs are isolated from each other over L2; the host NATs outbound HTTPS out (see `deploy/deploy.sh`), and the image bakes a real `resolv.conf` (the old host `--bind-ro=/etc/resolv.conf` would point at the container's own loopback). The JIT credential is passed via a ro bind-mounted root-only file, never on the command line.
 
