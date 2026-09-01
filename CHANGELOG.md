@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.0.7](https://github.com/whywaita/actions-runner-processor/compare/v0.0.6...v0.0.7) - 2026-09-01
+
+- ci: run the full image build alongside each GitHub Release by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/19
+- fix: restore sudo setuid bit and docker group in runner image by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/23
+- fix(ci): dispatch full-image build from goreleaser (release.yaml) by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/24
+- fix(ci): grant actions:write so goreleaser can dispatch build-image-full by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/25
+- feat(setup): one-shot host bootstrap via `actions-runner-processor setup` by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/26
+
 ## [v0.0.6](https://github.com/whywaita/actions-runner-processor/compare/v0.0.5...v0.0.6) - 2026-08-30
 
 - feat: distribute the full runner image as split release parts by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/17
