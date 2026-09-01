@@ -28,6 +28,8 @@ func main() {
 		switch os.Args[1] {
 		case "image":
 			os.Exit(runImageCmd(os.Args[2:]))
+		case "setup":
+			os.Exit(runSetupCmd(os.Args[2:]))
 		case "-h", "--help", "help":
 			usage()
 			os.Exit(0)
@@ -292,7 +294,7 @@ func checkBtrfs(path string) func() error {
 			return fmt.Errorf("statfs %s: %w", path, err)
 		}
 		if fs.Type != btrfsSuperMagic {
-			return fmt.Errorf("%s is not on a btrfs filesystem (fstype=%d); the runner image must be a btrfs subvolume (see deploy/setup.sh)", path, fs.Type)
+			return fmt.Errorf("%s is not on a btrfs filesystem (fstype=%d); the runner image must be a btrfs subvolume (run `actions-runner-processor setup --image lightweight|full`)", path, fs.Type)
 		}
 		if out, err := exec.Command("btrfs", "subvolume", "show", path).CombinedOutput(); err != nil {
 			return fmt.Errorf("%s is not a btrfs subvolume: %s", path, strings.TrimSpace(string(out)))
@@ -313,7 +315,11 @@ func usage() {
 	fmt.Fprint(os.Stderr, `actions-runner-processor — a lightweight self-hosted GitHub Actions runner processor
 
 Usage:
-  actions-runner-processor                     run the processor daemon
+  actions-runner-processor                      run the processor daemon
+  actions-runner-processor setup --image <lightweight|full> [--size <n>] [--yes]
+                                                one-shot host bootstrap: provision the
+                                                btrfs backing + image subvolume, install
+                                                the image, NAT, and enable the service
   actions-runner-processor image install-full  download + expand the full runner image
     [--release <tag|release-url>]             split parts of a specific release
                                                (default: newest release, no auth)
@@ -325,6 +331,7 @@ Usage:
     --image-path <path>                        image subvolume (default: config image_path or /opt/runner-btrfs/image)
   actions-runner-processor help                show this help
 
-The runner image must be a btrfs subvolume (btrfs is enforced). See deploy/setup.sh.
+The runner image must be a btrfs subvolume (btrfs is enforced). Run
+`+"`actions-runner-processor setup --image lightweight|full`"+` to provision it.
 `)
 }

@@ -15,8 +15,9 @@ runner:
   shutdown_grace_timeout: "10m"    # default 10m
   # Custom runner image (root filesystem directory). Booted via --ephemeral:
   # the image MUST be a btrfs subvolume (enforced at startup) so systemd-nspawn
-  # can CoW-snapshot it cheaply and discard the writable copy on exit. deploy/
-  # setup.sh provisions a loopback btrfs at /opt/runner-btrfs automatically.
+  # can CoW-snapshot it cheaply and discard the writable copy on exit.
+  # `actions-runner-processor setup --image lightweight|full` provisions a
+  # loopback btrfs at /opt/runner-btrfs automatically.
   image_path: "/opt/runner-btrfs/image"
   max_runners: 0                   # 0 = NumCPU
   min_runners: 0
