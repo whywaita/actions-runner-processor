@@ -399,7 +399,8 @@ systemd-nspawn \
   --ephemeral \                            # CoW-snapshotted root; changes discarded on exit
   --boot \                                 # systemd as PID1: systemctl/dockerd work in jobs
 --network-zone=rn-<runner-id> \             # per-runner private bridge; isolated from host and other jobs
-  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN \   # dockerd (safe: netns is private)
+  --capability=CAP_SYS_ADMIN,CAP_NET_ADMIN,CAP_BPF \   # dockerd: storage + netfilter + device-cgroup BPF (safe: netns is private)
+  --system-call-filter=add:bpf \                       # allow bpf syscall for device cgroup (container jobs)
   --bind-ro=/run/actions-runner-processor/runner-<name>.jitconfig:/opt/actions-runner/.jitconfig \
   --machine=runner-<name>
 ```
