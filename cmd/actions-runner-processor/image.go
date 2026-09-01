@@ -500,7 +500,7 @@ func extractTar(r io.Reader, dest string) error {
 			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)&0o777); err != nil {
 				return err
 			}
-			if err := os.Chown(target, hdr.Uid, hdr.Gid); err != nil {
+			if err := applyTarMeta(target, hdr); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
@@ -531,13 +531,45 @@ func extractTar(r io.Reader, dest string) error {
 			if err := f.Close(); err != nil {
 				return err
 			}
-			if err := os.Chown(target, hdr.Uid, hdr.Gid); err != nil {
+			if err := applyTarMeta(target, hdr); err != nil {
 				return err
 			}
 		default:
 			// skip devices, hardlinks handled by linkname via os.Link, etc.
 		}
 	}
+}
+
+// applyTarMeta applies a tar entry's ownership (uid/gid) and full mode to an
+// already-extracted path. Chown must run BEFORE Chmod: chown clears the setuid
+// and setgid bits on Linux, so the mode (including setuid e.g. /usr/bin/sudo
+// 4755) is only guaranteed to survive if it is set last. hdr.Mode is stored in
+// raw Unix mode bits (0o4000 = setuid, 0o2000 = setgid, 0o1000 = sticky), not
+// Go's os.FileMode layout (ModeSetuid = 1<<22), so it cannot be passed straight
+// to os.Chmod; tarModeToFileMode re-maps the special bits.
+func applyTarMeta(target string, hdr *tar.Header) error {
+	if err := os.Chown(target, hdr.Uid, hdr.Gid); err != nil {
+		return err
+	}
+	return os.Chmod(target, tarModeToFileMode(hdr.Mode))
+}
+
+// tarModeToFileMode converts a raw Unix tar mode (archive/tar Header.Mode) into
+// an os.FileMode, preserving the setuid/setgid/sticky special bits. archive/tar
+// stores these in their standard Unix bit positions, which differ from
+// os.FileMode's ModeSetuid/ModeSetgid/ModeSticky constants.
+func tarModeToFileMode(m int64) os.FileMode {
+	mode := os.FileMode(m & 0o777)
+	if m&0o4000 != 0 {
+		mode |= os.ModeSetuid
+	}
+	if m&0o2000 != 0 {
+		mode |= os.ModeSetgid
+	}
+	if m&0o1000 != 0 {
+		mode |= os.ModeSticky
+	}
+	return mode
 }
 
 func fsType(path string) (int64, error) {
