@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.8](https://github.com/whywaita/actions-runner-processor/compare/v0.0.7...v0.0.8) - 2026-09-01
+
+- Fix docker container jobs failing with bpf_prog_query(BPF_CGROUP_DEVICE) operation not permitted by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/27
+
 ## [v0.0.7](https://github.com/whywaita/actions-runner-processor/compare/v0.0.6...v0.0.7) - 2026-09-01
 
 - ci: run the full image build alongside each GitHub Release by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/19
