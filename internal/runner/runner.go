@@ -181,7 +181,8 @@ func nspawnArgs(r *Runner) []string {
 		"--ephemeral",
 		"--boot",
 		"--network-zone=" + zoneFor(r.Name),
-		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN",
+		"--capability=CAP_SYS_ADMIN,CAP_NET_ADMIN,CAP_BPF",
+		"--system-call-filter=add:bpf",
 		"--machine=" + r.Name,
 	}
 	if r.JITConfig != "" {
