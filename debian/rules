@@ -1,0 +1,48 @@
+#!/usr/bin/make -f
+# debian/rules — Launchpad PPA build.
+#
+# go.mod requires Go >= 1.26.5. Neither Ubuntu noble nor resolute ships a
+# new enough Go natively, so the PPA must declare a build dependency on
+# ppa:longsleep/golang-backports (Launchpad: Edit PPA -> Dependencies),
+# which provides golang-1.26-go (>= 1.26.5) for both series.
+#
+# Go modules are vendored into the source tarball (see .github/workflows/ppa.yaml:
+# `go mod vendor` runs before dpkg-buildpackage -S) because Launchpad buildd
+# hosts have no network access. Bump the golang-1.26-go Build-Depends in
+# debian/control together with the go directive in go.mod.
+export PATH := /usr/lib/go-1.26/bin:$(PATH)
+export GOFLAGS := -mod=vendor
+export GOTOOLCHAIN := local
+export GOPROXY := off
+export CGO_ENABLED := 0
+
+%:
+	dh $@
+
+override_dh_auto_clean:
+	rm -rf .gobuild
+
+override_dh_auto_build:
+	mkdir -p .gobuild
+	go build -trimpath -ldflags="-s -w" \
+		-o .gobuild/actions-runner-processor ./cmd/actions-runner-processor
+
+override_dh_auto_install:
+	install -Dm755 .gobuild/actions-runner-processor \
+		debian/actions-runner-processor/usr/bin/actions-runner-processor
+	install -Dm644 deploy/config.example.yaml \
+		debian/actions-runner-processor/etc/actions-runner-processor/config.yaml
+	install -Dm644 deploy/actions-runner-processor.service \
+		debian/actions-runner-processor/lib/systemd/system/actions-runner-processor.service
+	install -Dm755 deploy/postinstall.sh \
+		debian/actions-runner-processor/usr/lib/actions-runner-processor/postinstall.sh
+	install -Dm755 deploy/preremove.sh \
+		debian/actions-runner-processor/usr/lib/actions-runner-processor/preremove.sh
+
+# Unit enable/disable is handled by postinstall.sh/preremove.sh (identical
+# to the nfpm-built .deb); do not let debhelper inject its own systemd hooks.
+override_dh_installsystemd:
+	@true
+
+# Static Go binaries have no separate .debug_info; skip the useless dwz pass.
+override_dh_dwz:

@@ -445,6 +445,36 @@ pre-release automatically, packaging a freshly-built lightweight runner image
 with it — useful for verifying a candidate on a real host before the final
 tagpr release.
 
+### Ubuntu PPA (24.04 / 26.04)
+
+Ready-made `.deb` packages for Ubuntu 24.04 (noble) and 26.04 (resolute) are
+published to the Launchpad PPA
+[`ppa:whywaita/actions-runner-processor`](https://launchpad.net/~whywaita/+archive/ubuntu/actions-runner-processor):
+
+```bash
+sudo add-apt-repository ppa:whywaita/actions-runner-processor
+sudo apt update
+sudo apt install actions-runner-processor
+```
+
+The package installs the binary at `/usr/bin/actions-runner-processor`, ships
+an example configuration at `/etc/actions-runner-processor/config.yaml`
+(conffile — edit it and place your GitHub App `.pem` there), and enables a
+systemd unit. `bubblewrap` and `fuse-overlayfs` are pulled in automatically as
+dependencies. The systemd service is enabled but not started on install; start
+it manually after configuring `/etc/actions-runner-processor/config.yaml`:
+
+```bash
+sudo systemctl start actions-runner-processor
+```
+
+> **For maintainers:** `.github/workflows/ppa.yaml` builds and uploads a source
+> package per series (`~ppa1~ubuntu24.04.1` for noble, `~ppa1~ubuntu26.04.1`
+> for resolute) on every stable `v*` tag push. One-time Launchpad setup (PPA
+> creation, enabling both series, adding the `longsleep/golang-backports`
+> build-dependency, registering the GPG/SSH keys) and the required repository
+> secrets are documented at the top of `.github/workflows/ppa.yaml`.
+
 ## License
 
 MIT
