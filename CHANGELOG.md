@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.9](https://github.com/whywaita/actions-runner-processor/compare/v0.0.8...v0.0.9) - 2026-09-09
+
+- chore: remove accidentally committed repo-root Go binary by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/30
+
 ## [v0.0.8](https://github.com/whywaita/actions-runner-processor/compare/v0.0.7...v0.0.8) - 2026-09-01
 
 - Fix docker container jobs failing with bpf_prog_query(BPF_CGROUP_DEVICE) operation not permitted by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/27
