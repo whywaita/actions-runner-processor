@@ -43,3 +43,6 @@ override_dh_auto_install:
 # to the nfpm-built .deb); do not let debhelper inject its own systemd hooks.
 override_dh_installsystemd:
 	@true
+
+# Static Go binaries have no separate .debug_info; skip the useless dwz pass.
+override_dh_dwz:
