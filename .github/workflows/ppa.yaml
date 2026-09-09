@@ -16,8 +16,9 @@ permissions:
   contents: read
 
 env:
-  LAUNCHPAD_USER: ${{ vars.LAUNCHPAD_USER || 'whywaita' }}
-  LAUNCHPAD_PPA: ${{ vars.LAUNCHPAD_PPA || 'actions-runner-processor' }}
+  # Hardcoded: Launchpad account / PPA identity.
+  LAUNCHPAD_USER: whywaita
+  LAUNCHPAD_PPA: actions-runner-processor
   # Must be an email registered on the Launchpad account (matches the GPG key
   # uid). Override via repository variable LAUNCHPAD_EMAIL.
   LAUNCHPAD_EMAIL: ${{ vars.LAUNCHPAD_EMAIL || 'whywaita@example.com' }}
@@ -35,9 +36,11 @@ env:
 #      an SSH key (used by dput sftp) on the Launchpad account.
 #
 # Repository settings:
-#   secrets:  LAUNCHPAD_GPG_PRIVATE_KEY (armored, no passphrase)
-#             LAUNCHPAD_SSH_PRIVATE_KEY (ed25519)
-#   variables: LAUNCHPAD_USER, LAUNCHPAD_PPA, LAUNCHPAD_EMAIL (optional)
+#   secrets:   LAUNCHPAD_GPG_PRIVATE_KEY (armored, no passphrase)
+#              LAUNCHPAD_SSH_PRIVATE_KEY (ed25519)
+#   variables: LAUNCHPAD_EMAIL (optional; the Launchpad account email, must
+#              match the GPG key uid). LAUNCHPAD_USER / LAUNCHPAD_PPA are
+#              hardcoded above (whywaita / actions-runner-processor).
 #
 # Trigger: stable tags only (vX.Y.Z, no -rc/-beta). Launchpad uploads are
 # per-series source builds with series-suffixed versions because a source
