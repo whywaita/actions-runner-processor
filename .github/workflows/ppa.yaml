@@ -174,12 +174,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # dispatch: use the requested tag; tag push: git ref name.
+          # Dispatch: keep THIS branch's debian/ packaging and use the given
+          # tag's code+version. The repo root tracks packaging state only after
+          # merge, so we must NOT switch to a tag that lacks debian/.
+          # We build source from the current tree; version derives from the tag.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ inputs.tag }}"
-            echo "Dispatching on tag ${TAG}..."
-            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
-            git checkout -q "$TAG"
+            echo "Dispatching: packaging branch ${GITHUB_REF_NAME} + code tag ${TAG}"
           else
             TAG="${GITHUB_REF_NAME#v}"
           fi
