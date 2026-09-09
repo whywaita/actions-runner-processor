@@ -11,6 +11,14 @@ on:
       - ".github/workflows/ppa.yaml"
       - "go.mod"
       - "go.sum"
+  # Manual trigger to publish an existing stable tag on demand (e.g. during
+  # setup testing). TODO: remove before merge or keep for operational use.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Stable tag to publish, e.g. v0.0.8"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -94,8 +102,10 @@ jobs:
           dpkg-deb --contents ../actions-runner-processor_*.deb
 
   # Stable tag push: build one source package per series and upload both.
+  # Also triggerable manually via workflow_dispatch (input: tag) for on-demand
+  # publishing / setup testing.
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')) || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -164,8 +174,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="${GITHUB_REF_NAME#v}"
-          PPA_VER="${TAG}~ppa1~ubuntu${SERIES_VER}.1"
+          # dispatch: use the requested tag; tag push: git ref name.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            echo "Dispatching on tag ${TAG}..."
+            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            git checkout -q "$TAG"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
+          PPA_VER="${TAG#v}~ppa1~ubuntu${SERIES_VER}.1"
+          echo "Publishing tag=${TAG} -> version=${PPA_VER} (${CODENAME}/${SERIES_VER})"
 
           cat > debian/changelog <<EOF
           actions-runner-processor (${PPA_VER}) ${CODENAME}; urgency=medium
