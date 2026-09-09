@@ -1,2 +1,6 @@
 dist/
 .release/
+# Go build artifact if built at the repo root (accidentally committed before)
+/actions-runner-processor
+.gobuild/
+vendor/
