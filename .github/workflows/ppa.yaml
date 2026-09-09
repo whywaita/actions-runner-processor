@@ -82,9 +82,13 @@ jobs:
 
       - name: Build binary package
         run: |
-          debuild -b -us -uc --no-lintian 2>&1 | tail -30
-          dpkg-deb --info ../actions-runner-processor_*.deb | head -20
-          dpkg-deb --contents ../actions-runner-processor_*.deb | grep -E '(usr/bin/actions-runner-processor|systemd/system|usr/lib/actions-runner-processor)' || true
+          set -o pipefail
+          dpkg-buildpackage -b -us -uc -rfakeroot 2>&1 | tail -40
+          echo "== built deb =="
+          ls -la ../actions-runner-processor_*.deb
+          dpkg-deb --info ../actions-runner-processor_*.deb | head -25
+          echo "== contents =="
+          dpkg-deb --contents ../actions-runner-processor_*.deb
 
   # Stable tag push: build one source package per series and upload both.
   publish:
