@@ -68,7 +68,7 @@ jobs:
           sudo apt-get install -y -qq software-properties-common
           sudo add-apt-repository -y ppa:longsleep/golang-backports >/dev/null
           sudo apt-get update -qq
-          sudo apt-get install -y -qq golang-1.26-go debhelper devscripts fakeroot
+          sudo apt-get install -y -qq build-essential golang-1.26-go debhelper devscripts fakeroot
 
       - name: Rewrite changelog for validation build
         run: |
