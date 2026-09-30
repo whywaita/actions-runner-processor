@@ -211,6 +211,26 @@ touch /etc/waagent.conf
 # installed, so create an empty file for the sed -i to succeed as a no-op.
 touch /etc/default/motd-news
 
+# configure-environment.sh relaxes the root filesystem durability through the
+# kernel command line: it writes /etc/default/grub.d/99-runner-performance.cfg
+# and calls `update-grub` (actions/runner-images 5b925cc1, "Improve Ubuntu image
+# performance"). That assumes the Azure VM's grub, which a debootstrap rootfs
+# does not have — `update-grub: command not found` fails the script under
+# `set -e`. A container booted by systemd-nspawn has no bootloader at all: the
+# kernel is the host's and the root filesystem is the host's mount (a btrfs
+# subvolume), so there is no GRUB configuration to regenerate and installing
+# grub-common would only give grub-mkconfig devices to inspect that do not
+# exist. Provide `update-grub` as a PATH-first no-op, like the apparmor_parser
+# wrapper below; the drop-in file itself is still written, matching upstream.
+cat > /usr/local/bin/update-grub <<'UGRUB'
+#!/bin/bash
+# No bootloader inside nspawn images (the host kernel boots the container, the
+# root filesystem is the host's). Nothing to regenerate.
+echo "note: update-grub is a no-op in nspawn images (no bootloader)"
+exit 0
+UGRUB
+chmod +x /usr/local/bin/update-grub
+
 # GitHub-hosted Ubuntu 24.04 (noble) images manage apt sources through the
 # deb822 file /etc/apt/sources.list.d/ubuntu.sources; debootstrap's minbase
 # leaves a legacy /etc/apt/sources.list instead. configure-apt-sources.sh and
