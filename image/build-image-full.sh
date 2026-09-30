@@ -617,6 +617,25 @@ exec /opt/actions-runner/run.sh
 EP
 chmod 755 "$RT/opt/actions-runner/entrypoint.sh"
 
+# Pin the tool cache for the runner process. The runner resolves its tool cache
+# from RUNNER_TOOL_CACHE / RUNNER_TOOLSDIRECTORY / AGENT_TOOLSDIRECTORY and
+# otherwise falls back to <runner root>/_work/_tool, then exports whatever it
+# resolved to the job steps as RUNNER_TOOL_CACHE
+# (Runner.Worker/JobRunner.cs + RunnerContext.GetRuntimeEnvironmentVariables);
+# that is the variable @actions/tool-cache reads (it throws "Expected
+# RUNNER_TOOL_CACHE to be defined" when it is unset) and therefore what
+# setup-python / setup-node / setup-go look up first. The paths
+# configure-environment.sh writes into /etc/environment do NOT reach this
+# process: /etc/environment is a PAM login-session file that systemd services do
+# not read, and this image registers the runner with a JIT config, so config.sh
+# never snapshots the environment into <runner root>/.env either. Write it
+# explicitly — Runner.Listener loads .env at startup
+# (Runner.Listener/Program.cs LoadAndSetEnv) before it resolves the tool cache,
+# and job steps inherit it.
+printf 'AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache\nRUNNER_TOOL_CACHE=/opt/hostedtoolcache\n' \
+  > "$RT/opt/actions-runner/.env"
+chmod 644 "$RT/opt/actions-runner/.env"
+
 # actions-runner.service: one job per container; powers off (tears down nspawn)
 # when the runner exits.
 cat > "$RT/etc/systemd/system/actions-runner.service" <<'UN'

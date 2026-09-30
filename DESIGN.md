@@ -280,6 +280,12 @@ GitHub-hosted-compatible toolset. `actions/runner-images` is built by running
 loop over these shell scripts), so this script debootstraps a base, boots it
 in a `systemd-nspawn` container (`--boot`), and runs the same build scripts
 directly inside with the repo bind-mounted. **No LXD or Packer is needed.**
+The two PowerShell provisioners that upstream keeps outside this shell loop —
+`Install-Toolset.ps1` / `Configure-Toolset.ps1`, which populate the agent
+toolcache (`/opt/hostedtoolcache/{Python,node,go}`) that
+`actions/setup-python|node|go` read — run at the end of the loop, and the
+toolcache path is pinned for the runtime image through `/opt/actions-runner/.env`
+(systemd units do not read `/etc/environment`, where upstream records it).
 Heavy (~1h, 50GB+), gated on `workflow_dispatch` / auto-run from the `release`
 workflow via the
 `.github/workflows/build-image-full.yaml` workflow (separate from the
