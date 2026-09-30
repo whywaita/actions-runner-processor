@@ -410,6 +410,81 @@ TRAPEOF
     fi
 done
 
+# --- toolcache: Python / node / go -------------------------------------------
+# install-python.sh / install-nodejs.sh only install the *system* python and
+# node; the toolcache that actions/setup-python|setup-node|setup-go read is
+# produced by upstream's PowerShell provisioners Install-Toolset.ps1 and
+# Configure-Toolset.ps1: they download every version listed in toolset.json's
+# toolcache[] from the actions/*-versions manifests, run the setup.sh of each
+# asset, and leave /opt/hostedtoolcache/<tool>/<version>/<arch>.complete behind.
+# packer runs both right after install-docker.sh (see
+# images/ubuntu/templates/build.ubuntu-*.pkr.hcl), i.e. at the end of the loop
+# above — without them the image has no /opt/hostedtoolcache/{Python,node,go} at
+# all and every job re-downloads its toolchain.
+#
+# Install-Toolset.ps1 imports "$HELPER_SCRIPTS/../tests/Helpers.psm1" and
+# Configure-Toolset.ps1 ends by running the Toolset Pester suite. This build
+# installs no PowerShell modules (there is no Pester) and has no
+# /imagegeneration/tests, and its toolcache is deliberately a subset of
+# upstream's (the same suite asserts Java/Android/Ruby/CodeQL/...), so provide a
+# module whose test entry point is a no-op — the same treatment the bash test
+# harness gets (invoke-tests.sh above).
+mkdir -p "$INSTALLER_SCRIPT_FOLDER/tests"
+cat > "$INSTALLER_SCRIPT_FOLDER/tests/Helpers.psm1" <<'PHELPERS'
+Import-Module "$PSScriptRoot/../helpers/Common.Helpers.psm1" -DisableNameChecking
+
+function Invoke-PesterTests {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $TestFile,
+        [string] $TestName
+    )
+
+    Write-Host "Pester tests are disabled for nspawn builds; skipping '$TestFile'."
+}
+PHELPERS
+
+# AGENT_TOOLSDIRECTORY must be in the environment of the pwsh step: every tool's
+# setup.sh resolves its destination root from it (python-versions falls back to
+# an empty RUNNER_TOOL_CACHE, node/go-versions read it directly), so without it
+# the tools install into /Python, /node and /go instead of the toolcache —
+# silently, because `mkdir -p /Python` succeeds as root. It has to be the
+# upstream path: the python-versions binaries are linked with
+# RUNPATH=/opt/hostedtoolcache/<tool>/<version>/<arch>/lib, so any other location
+# yields a python that cannot import pip. Configure-Toolset.ps1 resolves the
+# default go version path through the same variable.
+# SUDO_USER is what Install-Toolset.ps1 chowns each toolcache directory to.
+# Upstream runs it under sudo (which sets SUDO_USER); provisioning here is root,
+# so point it at the runner user explicitly.
+for ps_script in Install-Toolset.ps1 Configure-Toolset.ps1; do
+  if [ -f "$INSTALLER_SCRIPT_FOLDER/$ps_script" ]; then
+    echo "### running $ps_script"
+    apt-get clean 2>/dev/null || true
+    df -h / 2>/dev/null | awk 'NR==1 || /\/$/' | sed 's/^/[disk] /' >&2
+    SUDO_USER=runner \
+      AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache \
+      pwsh -NoLogo -NonInteractive -File "$INSTALLER_SCRIPT_FOLDER/$ps_script" || {
+        echo "FAILED: $ps_script" >&2
+        echo "FAILED:$ps_script" > "$STATUS_FILE" 2>/dev/null || true
+        exit 1
+      }
+  else
+    echo "### (skip) $ps_script not present"
+  fi
+done
+
+# Fail the build if the toolcache did not actually land: these markers are
+# exactly what actions/setup-* look for (a version directory is only usable once
+# <version>/<arch>.complete exists next to it).
+for tool in Python node go; do
+  if ! ls /opt/hostedtoolcache/"$tool"/*/x64.complete >/dev/null 2>&1; then
+    echo "error: toolcache for $tool missing (/opt/hostedtoolcache/$tool/*/x64.complete)" >&2
+    echo "FAILED:toolcache $tool" > "$STATUS_FILE" 2>/dev/null || true
+    exit 1
+  fi
+  echo ">>> toolcache $tool: $(ls -d /opt/hostedtoolcache/"$tool"/*/x64 2>/dev/null | tr '\n' ' ')"
+done
+
 # The runner-images scripts (running as root) may have written tool caches
 # under /home/runner — hand them back to the runner user so the image matches
 # the GitHub layout where the runner user owns its home directory.
