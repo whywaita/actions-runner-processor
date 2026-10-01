@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|purge|deconfigure)
+    # Same stop+disable logic as the GitHub-Releases .deb.
+    if [ -x /usr/lib/actions-runner-processor/preremove.sh ]; then
+      /usr/lib/actions-runner-processor/preremove.sh || true
+    fi
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,23 @@
+Source: actions-runner-processor
+Section: admin
+Priority: optional
+Maintainer: whywaita <whywaita@example.com>
+Build-Depends: debhelper (>= 13~), golang-1.26-go (>= 1.26.5)
+Standards-Version: 4.7.0
+Homepage: https://github.com/whywaita/actions-runner-processor
+Vcs-Git: https://github.com/whywaita/actions-runner-processor.git
+Vcs-Browser: https://github.com/whywaita/actions-runner-processor
+Rules-Requires-Root: no
+
+Package: actions-runner-processor
+Architecture: amd64 arm64
+Depends: bubblewrap, fuse-overlayfs, ${misc:Depends}
+Description: GitHub Actions self-hosted runner processor for Linux VMs
+ A lightweight, single-binary GitHub Actions self-hosted runner processor
+ for homelab Linux VMs. It uses the actions/scaleset Message Session API
+ (the same protocol as ARC) to detect queued jobs and launch ephemeral
+ runners inside bubblewrap sandboxes.
+ .
+ Go modules are vendored (see vendor/) so the package builds on Launchpad
+ buildd hosts, which have no network access. Bump the golang-1.26-go
+ version in Build-Depends together with the go directive in go.mod.

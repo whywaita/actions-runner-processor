@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    # Provision the host exactly like the GitHub-Releases .deb does
+    # (user, fuse group, dirs, fuse.conf, AppArmor sysctl, config perms,
+    #  systemd daemon-reload + enable).
+    if [ -x /usr/lib/actions-runner-processor/postinstall.sh ]; then
+      /usr/lib/actions-runner-processor/postinstall.sh || true
+    fi
+
+    # On upgrade: pick up the newly installed binary if the service was running.
+    if [ -n "$2" ] && command -v systemctl >/dev/null 2>&1; then
+      systemctl try-restart actions-runner-processor.service >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0

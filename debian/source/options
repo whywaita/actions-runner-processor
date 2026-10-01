@@ -1,0 +1,4 @@
+# Extra patterns to exclude when dpkg-source builds the source tarball
+# (dist/ and .gobuild/ are local build outputs, never upstream sources).
+tar-ignore = dist
+tar-ignore = .gobuild
