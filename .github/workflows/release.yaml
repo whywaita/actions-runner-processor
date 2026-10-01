@@ -66,16 +66,30 @@ jobs:
       # instead of a `uses:` reusable-workflow call: the reusable-call phase
       # evaluation combined with `if:` + `needs:` was observed to SKIP the
       # build-full-image job on tag-push runs (2026-09-01, v0.0.7-rc1), silently
-      # shipping releases without a fresh full image. The dispatch step is gated
-      # on the tag ref so it fires exactly once per release (not on the tagpr
-      # main-push run, where github.ref is refs/heads/main).
+      # shipping releases without a fresh full image.
+      #
+      # The normal release path is a push to main, where tagpr creates the tag
+      # and the Release itself, so gating only on `startsWith(github.ref,
+      # 'refs/tags/')` never fired: a tag created with GITHUB_TOKEN does not
+      # trigger a workflow run, which is why no run exists for v0.0.8 or v0.0.9
+      # and both releases shipped without a full image (their parts only appeared
+      # later through manual dispatches). Fire on the tagpr output as well — it is
+      # exactly the "a release was just cut" signal, the same one goreleaser is
+      # gated on above — and build the image from the tag, so the published image
+      # is attributable to the release.
       - name: Dispatch full image build
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || needs.tagpr.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          TAGPR_TAG: ${{ needs.tagpr.outputs.tag }}
         run: |
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            ref="$TAGPR_TAG"
+          else
+            ref="$GITHUB_REF_NAME"
+          fi
           gh workflow run build-image-full.yaml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref "$GITHUB_REF_NAME" \
+            --ref "$ref" \
             -f release=24.04
-          echo "dispatched build-image-full at ref=$GITHUB_REF_NAME"
+          echo "dispatched build-image-full at ref=$ref"
