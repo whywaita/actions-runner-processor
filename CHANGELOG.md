@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.11](https://github.com/whywaita/actions-runner-processor/compare/v0.0.10...v0.0.11) - 2026-10-13
+
+- Introduce artifact attestations (actions/attest) to release artifacts by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/36
+
 ## [v0.0.10](https://github.com/whywaita/actions-runner-processor/compare/v0.0.9...v0.0.10) - 2026-10-01
 
 - ci(release): dispatch the full image build automatically on a release by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/34
