@@ -379,10 +379,14 @@ func installFullFromArtifact(ctx context.Context, auth client.GitHubAuth, owner,
 		defer func() { _ = w.Close() }()
 		done <- client.DownloadArtifact(ctx, auth, owner, repo, artifactID, w)
 	}()
-	defer func() { _ = r.Close(); <-done }()
+	defer func() { _ = r.Close() }()
 
 	if err := extractArtifactZip(r, imagePath); err != nil {
 		return fmt.Errorf("extract artifact: %w", err)
+	}
+	// The reader is drained; surface the producer's result if it failed.
+	if err := <-done; err != nil {
+		return fmt.Errorf("download artifact: %w", err)
 	}
 	return nil
 }
