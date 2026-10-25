@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.12](https://github.com/whywaita/actions-runner-processor/compare/v0.0.11...v0.0.12) - 2026-10-25
+
+- Bump minimum Go toolchain to 1.27.3 (GO-2026-6809) by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/38
+
 ## [v0.0.11](https://github.com/whywaita/actions-runner-processor/compare/v0.0.10...v0.0.11) - 2026-10-13
 
 - Introduce artifact attestations (actions/attest) to release artifacts by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/36
