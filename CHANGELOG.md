@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.13](https://github.com/whywaita/actions-runner-processor/compare/v0.0.12...v0.0.13) - 2026-11-02
+
+- ci: adopt GitHub Actions workflow dependency lockfiles by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/40
+
 ## [v0.0.12](https://github.com/whywaita/actions-runner-processor/compare/v0.0.11...v0.0.12) - 2026-10-25
 
 - Bump minimum Go toolchain to 1.27.3 (GO-2026-6809) by @whywaita in https://github.com/whywaita/actions-runner-processor/pull/38
