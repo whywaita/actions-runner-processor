@@ -19,6 +19,7 @@ import (
 	"github.com/whywaita/actions-runner-processor/internal/client"
 	"github.com/whywaita/actions-runner-processor/internal/config"
 	"github.com/whywaita/actions-runner-processor/internal/metrics"
+	"github.com/whywaita/actions-runner-processor/internal/runner"
 	"github.com/whywaita/actions-runner-processor/internal/scaler"
 	"github.com/whywaita/actions-runner-processor/internal/webui"
 )
@@ -253,7 +254,36 @@ func preflight(cfg *config.Config) error {
 		}
 		slog.Info("preflight check passed", "check", c.name)
 	}
+	reportSandboxStack()
 	return nil
+}
+
+// reportSandboxStack logs what container tooling the host runs. Purely
+// informational (never fails the preflight): the processor launches raw
+// systemd-nspawn machines, which coexist with the nspawn.org tooling
+// (github.com/nspawn/nspawn, 2.x machine records / 3.x Docker Engine API) —
+// runner machines are visible to `nspawn` through systemd-machined but carry
+// no nspawn records, so `nspawn system prune` never removes them.
+func reportSandboxStack() {
+	if v, err := runner.SystemdNspawnVersion(); err != nil {
+		slog.Warn("could not read systemd-nspawn version", "error", err)
+	} else {
+		slog.Info("sandbox stack: systemd-nspawn", "systemd_nspawn_version", v)
+	}
+	t := runner.DetectNspawnTooling()
+	if !t.Installed {
+		return
+	}
+	attrs := []any{
+		"nspawn_version", t.Version,
+		"service_up", t.ServiceUp,
+		"api_socket", t.APISocket,
+	}
+	if t.ServiceUp {
+		slog.Info("nspawn.org tooling detected; runner machines are raw systemd-nspawn (no nspawn records)", attrs...)
+	} else {
+		slog.Info("nspawn.org tooling detected; bus service not answering (install it with `sudo nspawn daemon --install`)", attrs...)
+	}
 }
 
 func checkBinary(name string) func() error {

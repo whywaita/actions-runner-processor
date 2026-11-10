@@ -52,6 +52,16 @@ apt install systemd-container
 # bundled image/build-*.sh scripts bake this in.
 ```
 
+**Coexistence with the [nspawn](https://github.com/nspawn/nspawn) tooling
+(nspawn 2.x/3.x, Docker Engine API):** not required and not used, but safe to
+have on the same host. The processor launches raw `systemd-nspawn` machines —
+`nspawn` sees them through systemd-machined while they run, holds no records
+for them, and its `system prune` never removes them. The startup preflight
+logs the detected stack (systemd-nspawn version, nspawn service version, API
+socket presence); see DESIGN.md for why the Docker Engine API is not used as
+a launch backend.
+
+
 ### Building a custom runner image
 
 `runner.image_path` must point to a root filesystem tree that contains the

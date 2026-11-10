@@ -239,6 +239,38 @@ systemd-nspawn \
 - The config file and the GitHub App private key are hidden from the sandbox by binding `/dev/null` over them.
 - When a runner process exits, its GitHub registration is removed using the runner ID from the JIT response.
 
+#### Coexistence with the nspawn.org tooling (nspawn 2.x / 3.x)
+
+The [nspawn](https://github.com/nspawn/nspawn) container tooling ("Docker-like
+management of systemd-nspawn machines"; 3.0 added a Docker Engine API on
+`/run/nspawn/api.sock`) can be installed on the same host. The processor's raw
+`systemd-nspawn` launches coexist with it:
+
+- Runner machines register with systemd-machined like any machine, so `nspawn`
+  lists them while they run, but they carry **no nspawn records** (they were
+  not created through `nspawn`): the tooling does not manage their lifecycle,
+  and its `system prune` never removes them.
+- The nspawn 3.0 breaking changes do not reach runner machines: they mount
+  neither `/run/docker.sock` nor `/run/nspawn/api.sock` (they run their own
+  dockerd inside), so the socket's new read-write semantics are irrelevant.
+- The processor's preflight logs the detected stack (systemd-nspawn version;
+  nspawn service version and API socket presence when the tooling is
+  installed). Detection is informational and never fails startup.
+
+The nspawn Docker Engine API is deliberately **not** used as a launch backend:
+
+1. The runner image needs `--system-call-filter=add:bpf` + `CAP_BPF` for
+   dockerd's runc to set up the cgroup v2 device controller (see below). The
+   API's machine options (`CreateMachine`) have no seccomp/system-call-filter
+   equivalent, so containers created through the API would regress to broken
+   `container:` workflow jobs.
+2. Runner images are btrfs rootfs directories CoW-snapshotted by
+   `--ephemeral`; nspawn machines must come from OCI images in its store
+   (directory import is unsupported). Adopting it would mean reworking the
+   image pipeline (mkosi `--format=oci`) for no operational gain — revisit if
+   nspawn adds a SystemCallFilter machine option.
+
+
 ### 3.3.2 Custom runner image generation
 
 `image/` ships declarative builders for the nspawn rootfs. There are two:
